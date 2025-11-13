@@ -9,7 +9,7 @@ from core.workload_analyzer import analyze_workload
 st.set_page_config(page_title="Doctor Dashboard", layout="wide")
 st.title("📊 Doctor Dashboard")
 
-# We rely on the roster from the Roster Builder page
+# Get roster from session
 roster = st.session_state.get("roster", None)
 
 if roster is None:
@@ -51,7 +51,7 @@ st.subheader("Who is on Duty Now?")
 
 now = datetime.now()
 
-# Build shift lookup
+# Build lookup
 shift_map = {s.id: s for s in roster.shifts}
 doctor_name_map = {d.id: d.name for d in roster.doctors}
 
@@ -70,26 +70,7 @@ for a in roster.assignments:
         )
 
 if not on_now:
-    st.info("No doctors currently on duty (based on local system time).")
+    st.info("No doctors currently on duty (based on system time).")
 else:
     df_on = pd.DataFrame(on_now)
     st.dataframe(df_on, use_container_width=True)
-
-
-df = pd.DataFrame(summary)
-
-st.subheader("Doctor Summary")
-st.dataframe(df, use_container_width=True)
-
-# Optionally: filter by doctor
-doctor_names = {d.id: d.name for d in roster.doctors}
-selected = st.selectbox(
-    "Select a doctor to inspect",
-    options=list(doctor_names.keys()),
-    format_func=lambda i: doctor_names[i],
-)
-
-st.markdown(f"### Details for {doctor_names[selected]}")
-row = df[df["doctor_id"] == selected].iloc[0]
-st.write(row.to_dict())
-
