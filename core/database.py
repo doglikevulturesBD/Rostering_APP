@@ -1,5 +1,7 @@
 # core/database.py
 
+# core/database.py
+
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -11,21 +13,26 @@ from core.models import Doctor, Shift
 DB_PATH = Path("data/ed_roster.db")
 
 
+# ==========================================================
+#  CONNECTION + INITIALIZATION
+# ==========================================================
+
 def get_connection() -> sqlite3.Connection:
+    """Ensures DB folder exists and returns a connection."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-# ---------------------------------------------------------
-# INIT DATABASE
-# ---------------------------------------------------------
 def init_db():
+    """Initializes the doctors and shifts tables."""
     conn = get_connection()
     cur = conn.cursor()
 
-    # Doctors table
+    # -------------------------
+    # Doctors Table
+    # -------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doctors (
@@ -44,7 +51,9 @@ def init_db():
         """
     )
 
-    # Shifts table
+    # -------------------------
+    # Shifts Table
+    # -------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
@@ -66,10 +75,12 @@ def init_db():
     conn.close()
 
 
-# ---------------------------------------------------------
-# DOCTOR FUNCTIONS
-# ---------------------------------------------------------
+# ==========================================================
+#  DOCTOR HELPERS
+# ==========================================================
+
 def _row_to_doctor(row: sqlite3.Row) -> Doctor:
+    """Convert DB row → Doctor object."""
     return Doctor(
         id=row["external_id"],
         name=row["name"],
@@ -81,7 +92,51 @@ def _row_to_doctor(row: sqlite3.Row) -> Doctor:
     )
 
 
+def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> Doctor:
+    """
+    Creates a doctor and returns a full Doctor object.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+
+    # Insert placeholder external_id until we have the DB auto-ID
+    cur.execute(
+        """
+        INSERT INTO doctors
+        (external_id, name, level, firm, contract_hours, min_shifts, max_shifts,
+         active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        ("", name, level, firm, contract_hours, min_shifts, max_shifts, now, now),
+    )
+
+    new_id = cur.lastrowid
+    external_id = f"D{new_id:02d}"
+
+    # Update external_id
+    cur.execute(
+        "UPDATE doctors SET external_id=?, updated_at=? WHERE id=?",
+        (external_id, now, new_id),
+    )
+
+    conn.commit()
+    conn.close()
+
+    # Return Doctor object
+    return Doctor(
+        id=external_id,
+        name=name,
+        level=level,
+        firm=firm,
+        contract_hours_per_month=contract_hours,
+        min_shifts_per_month=min_shifts,
+        max_shifts_per_month=max_shifts,
+    )
+
+
 def get_all_doctors(active_only: bool = True) -> List[Doctor]:
+    """Loads all doctors, ordered by DB ID."""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -96,38 +151,54 @@ def get_all_doctors(active_only: bool = True) -> List[Doctor]:
     return [_row_to_doctor(r) for r in rows]
 
 
-def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts):
+def update_doctor_hours_and_shifts(external_id, contract_hours, min_shifts, max_shifts):
+    """Update contract hours and shift requirements for a doctor."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
 
     cur.execute(
         """
-        INSERT INTO doctors
-        (external_id, name, level, firm, contract_hours, min_shifts, max_shifts, active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        UPDATE doctors
+        SET contract_hours = ?,
+            min_shifts = ?,
+            max_shifts = ?,
+            updated_at = ?
+        WHERE external_id = ?
         """,
-        ("", name, level, firm, contract_hours, min_shifts, max_shifts, now, now),
-    )
-
-    db_id = cur.lastrowid
-    external_id = f"D{db_id:02d}"
-
-    cur.execute(
-        "UPDATE doctors SET external_id=?, updated_at=? WHERE id=?",
-        (external_id, now, db_id),
+        (contract_hours, min_shifts, max_shifts, now, external_id),
     )
 
     conn.commit()
     conn.close()
 
-    return external_id
+
+def deactivate_doctor(external_id):
+    """Soft-delete a doctor by marking them inactive."""
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+
+    cur.execute(
+        """
+        UPDATE doctors
+        SET active = 0,
+            updated_at = ?
+        WHERE external_id = ?
+        """,
+        (now, external_id),
+    )
+
+    conn.commit()
+    conn.close()
 
 
-# ---------------------------------------------------------
-# SHIFT FUNCTIONS
-# ---------------------------------------------------------
+# ==========================================================
+#  SHIFT HELPERS
+# ==========================================================
+
 def delete_all_shifts():
+    """Remove all shift entries."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM shifts")
@@ -136,6 +207,7 @@ def delete_all_shifts():
 
 
 def save_shifts(shifts: List[Shift]):
+    """Save a list of Shift objects into the DB (overwrite existing)."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
@@ -167,10 +239,13 @@ def save_shifts(shifts: List[Shift]):
 
 
 def load_shifts() -> List[Shift]:
+    """Load all shifts from DB and return as Shift objects."""
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("SELECT * FROM shifts ORDER BY start")
     rows = cur.fetchall()
+
     conn.close()
 
     return [Shift.from_dict(dict(r)) for r in rows]
