@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+from core.workload_analyzer import analyze_workload
+
 
 from core.generate_shifts import generate_shifts_for_month
 from core.database import load_shifts, get_all_doctors
@@ -78,3 +80,24 @@ if st.session_state["roster"]:
         df_assign.to_csv(index=False).encode("utf-8"),
         file_name="roster_output.csv",
     )
+if st.session_state["roster"]:
+    roster = st.session_state["roster"]
+    workload = analyze_workload(roster.doctors, roster.shifts, roster.assignments)
+
+    st.subheader("Doctor Workload Summary")
+
+    rows = []
+    for doc in roster.doctors:
+        w = workload[doc.id]
+        rows.append({
+            "Doctor": doc.name,
+            "Shifts": w.total_shifts,
+            "Hours": round(w.total_hours, 1),
+            "Night Shifts": w.night_shifts,
+            "Weekend Shifts": w.weekend_shifts,
+            "Consecutive Days": w.consecutive_days,
+            "Consecutive Nights": w.consecutive_nights,
+            "Intensity Sum": w.intensity_sum,
+        })
+
+    st.dataframe(rows, use_container_width=True)
