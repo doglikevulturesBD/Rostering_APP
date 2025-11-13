@@ -249,3 +249,22 @@ def load_shifts() -> List[Shift]:
     conn.close()
 
     return [Shift.from_dict(dict(r)) for r in rows]
+
+
+
+# Leave Table
+cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS leave_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doctor_external_id TEXT NOT NULL,
+        leave_type TEXT NOT NULL, -- "sick" or "annual"
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
+    )
+    """
+)
+
