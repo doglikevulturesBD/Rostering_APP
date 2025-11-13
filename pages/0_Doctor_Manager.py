@@ -40,7 +40,7 @@ if st.button("➕ Add Doctor"):
             max_shifts=int(max_shifts),
         )
         st.success(f"Doctor {doc.name} ({doc.id}) added.")
-        st.experimental_rerun()
+        st.rerun()
 
 st.subheader("Current Doctors")
 
@@ -103,9 +103,9 @@ else:
                 max_shifts=int(new_max),
             )
             st.success("Doctor updated.")
-            st.experimental_rerun()
+            st.rerun()
 
         if e_col5.button("🗑 Deactivate doctor"):
             deactivate_doctor(selected_id)
             st.warning("Doctor deactivated.")
-            st.experimental_rerun()
+            st.rerun()
