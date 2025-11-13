@@ -5,6 +5,9 @@ from typing import Dict, List
 from core.models import Doctor, Shift, Assignment
 
 
+REST_REQUIRED_HOURS = 18   # Default rest rule (customisable later)
+
+
 class DoctorWorkload:
     """
     Summary metrics for each doctor after roster generation.
@@ -19,7 +22,29 @@ class DoctorWorkload:
         self.consecutive_nights = 0
         self.intensity_sum = 0
         self.last_shift_end = None
-        self.rule_flags = []  # will store violations later
+
+        # New:
+        self.rest_violations = 0
+        self.burnout_score = 0
+        self.rule_flags = []  # text warnings
+
+
+def calculate_burnout(intensity_sum, night_shifts, consecutive_nights, total_hours):
+    """
+    Simple but effective burnout model.
+    Later we can replace with a machine-learning model.
+    """
+
+    # Weighted fatigue model
+    score = (
+        intensity_sum * 1.0 +
+        night_shifts * 2.0 +
+        consecutive_nights * 4.0 +
+        (total_hours / 10.0)  # each 10 hours = +1 point
+    )
+
+    # Normalise to 0–100 (soft cap)
+    return min(100, round(score, 1))
 
 
 def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: List[Assignment]):
@@ -32,7 +57,6 @@ def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: Li
     shift_map = {s.id: s for s in shifts}
     doctor_ids = {d.id for d in doctors}
 
-    # Initialize workload dict
     workload: Dict[str, DoctorWorkload] = {d.id: DoctorWorkload() for d in doctors}
 
     # Group assignments by doctor
@@ -42,11 +66,11 @@ def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: Li
         if a.doctor_id in doctor_ids and a.shift_id in shift_map:
             assignments_by_doctor[a.doctor_id].append(shift_map[a.shift_id])
 
-    # Sort shifts for each doctor by start time
+    # Sort shifts for each doctor
     for doc in doctor_ids:
         assignments_by_doctor[doc].sort(key=lambda s: s.start)
 
-    # Compute metrics
+    # Compute metrics with rule detection
     for doc_id, shift_list in assignments_by_doctor.items():
         w = workload[doc_id]
 
@@ -56,28 +80,43 @@ def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: Li
 
         for shift in shift_list:
 
-            # (1) Total shifts
             w.total_shifts += 1
 
-            # (2) Total hours
+            # ----------------------
+            # Hours
+            # ----------------------
             duration = shift.end - shift.start
             w.total_hours += duration.total_seconds() / 3600.0
 
-            # (3) Night shifts
+            # ----------------------
+            # Night + weekend
+            # ----------------------
             if shift.is_night:
                 w.night_shifts += 1
 
-            # (4) Weekend shifts
             if shift.is_weekend:
                 w.weekend_shifts += 1
 
-            # (5) Intensity (for burnout)
+            # ----------------------
+            # Intensity
+            # ----------------------
             w.intensity_sum += shift.intensity
 
-            # (6) Consecutive day/night streaks
+            # ----------------------
+            # Rest period check
+            # ----------------------
             if prev_shift:
-                rest_hours = (shift.start - prev_shift.end).total_seconds() / 3600.0
+                rest = (shift.start - prev_shift.end).total_seconds() / 3600.0
+                if rest < REST_REQUIRED_HOURS:
+                    w.rest_violations += 1
+                    w.rule_flags.append(
+                        f"Rest violation: only {round(rest,1)}h between shifts on {shift.start.date()}"
+                    )
 
+            # ----------------------
+            # Consecutive streaks
+            # ----------------------
+            if prev_shift:
                 if shift.is_night and prev_shift.is_night:
                     night_streak += 1
                 elif not shift.is_night and not prev_shift.is_night:
@@ -86,14 +125,23 @@ def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: Li
                     day_streak = 0
                     night_streak = 0
 
-                # Store longest streak
-                w.consecutive_days = max(w.consecutive_days, day_streak)
-                w.consecutive_nights = max(w.consecutive_nights, night_streak)
+            w.consecutive_days = max(w.consecutive_days, day_streak)
+            w.consecutive_nights = max(w.consecutive_nights, night_streak)
 
             prev_shift = shift
 
-        # Save last shift end
+        # Final shift end
         if shift_list:
             w.last_shift_end = shift_list[-1].end
+
+        # ----------------------
+        # Burnout score
+        # ----------------------
+        w.burnout_score = calculate_burnout(
+            w.intensity_sum,
+            w.night_shifts,
+            w.consecutive_nights,
+            w.total_hours,
+        )
 
     return workload
