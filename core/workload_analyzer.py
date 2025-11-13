@@ -141,4 +141,3 @@ def analyze_workload(
         )
 
     return workload
-
