@@ -1,10 +1,12 @@
 # core/database.py
+
 import sqlite3
 from pathlib import Path
-from typing import List, Optional
 from datetime import datetime
+from typing import List
 
-from .models import Doctor
+from core.models import Doctor, Shift
+
 
 DB_PATH = Path("data/ed_roster.db")
 
@@ -16,26 +18,28 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+# ---------------------------------------------------------
+# INIT DATABASE
+# ---------------------------------------------------------
 def init_db():
-    """Create tables if they don't exist."""
     conn = get_connection()
     cur = conn.cursor()
 
-    # Doctors table – we can extend this later without breaking anything
+    # Doctors table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doctors (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            external_id     TEXT UNIQUE,          -- e.g. D01, D02...
-            name            TEXT NOT NULL,
-            level           TEXT NOT NULL,        -- MO, Reg, Consultant, ComServ
-            firm            INTEGER,              -- optional
-            contract_hours  INTEGER NOT NULL DEFAULT 175,
-            min_shifts      INTEGER NOT NULL DEFAULT 16,
-            max_shifts      INTEGER NOT NULL DEFAULT 18,
-            active          INTEGER NOT NULL DEFAULT 1,
-            created_at      TEXT NOT NULL,
-            updated_at      TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            external_id TEXT UNIQUE,
+            name TEXT NOT NULL,
+            level TEXT NOT NULL,
+            firm INTEGER,
+            contract_hours INTEGER NOT NULL,
+            min_shifts INTEGER NOT NULL,
+            max_shifts INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -58,18 +62,13 @@ def init_db():
         """
     )
 
-
-
-
-    
-    # We'll add shifts, assignments, leave, etc. later
     conn.commit()
     conn.close()
 
 
-
-
-
+# ---------------------------------------------------------
+# DOCTOR FUNCTIONS
+# ---------------------------------------------------------
 def _row_to_doctor(row: sqlite3.Row) -> Doctor:
     return Doctor(
         id=row["external_id"],
@@ -85,29 +84,23 @@ def _row_to_doctor(row: sqlite3.Row) -> Doctor:
 def get_all_doctors(active_only: bool = True) -> List[Doctor]:
     conn = get_connection()
     cur = conn.cursor()
+
     if active_only:
         cur.execute("SELECT * FROM doctors WHERE active = 1 ORDER BY id")
     else:
         cur.execute("SELECT * FROM doctors ORDER BY id")
+
     rows = cur.fetchall()
     conn.close()
+
     return [_row_to_doctor(r) for r in rows]
 
 
-def create_doctor(
-    name: str,
-    level: str,
-    firm: Optional[int] = None,
-    contract_hours: int = 175,
-    min_shifts: int = 16,
-    max_shifts: int = 18,
-) -> Doctor:
+def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts):
     conn = get_connection()
     cur = conn.cursor()
-
     now = datetime.utcnow().isoformat()
 
-    # insert first to get numeric id
     cur.execute(
         """
         INSERT INTO doctors
@@ -116,71 +109,35 @@ def create_doctor(
         """,
         ("", name, level, firm, contract_hours, min_shifts, max_shifts, now, now),
     )
-    db_id = cur.lastrowid
 
-    # generate external_id like D01, D02,...
+    db_id = cur.lastrowid
     external_id = f"D{db_id:02d}"
+
     cur.execute(
-        "UPDATE doctors SET external_id = ?, updated_at = ? WHERE id = ?",
+        "UPDATE doctors SET external_id=?, updated_at=? WHERE id=?",
         (external_id, now, db_id),
     )
 
     conn.commit()
     conn.close()
 
-    return Doctor(
-        id=external_id,
-        name=name,
-        level=level,
-        firm=firm,
-        contract_hours_per_month=contract_hours,
-        min_shifts_per_month=min_shifts,
-        max_shifts_per_month=max_shifts,
-    )
+    return external_id
 
 
-def update_doctor_hours_and_shifts(
-    external_id: str,
-    contract_hours: int,
-    min_shifts: int,
-    max_shifts: int,
-):
+# ---------------------------------------------------------
+# SHIFT FUNCTIONS
+# ---------------------------------------------------------
+def delete_all_shifts():
     conn = get_connection()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
-    cur.execute(
-        """
-        UPDATE doctors
-        SET contract_hours = ?, min_shifts = ?, max_shifts = ?, updated_at = ?
-        WHERE external_id = ?
-        """,
-        (contract_hours, min_shifts, max_shifts, now, external_id),
-    )
+    cur.execute("DELETE FROM shifts")
     conn.commit()
     conn.close()
 
 
-def deactivate_doctor(external_id: str):
-    """Soft-delete; keep history."""
+def save_shifts(shifts: List[Shift]):
     conn = get_connection()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
-    cur.execute(
-        "UPDATE doctors SET active = 0, updated_at = ? WHERE external_id = ?",
-        (now, external_id),
-    )
-    conn.commit()
-    conn.close()
-
-# ------------------------------------------------------------
-# SHIFT DB FUNCTIONS
-# ------------------------------------------------------------
-
-def save_shifts(shifts):
-    """Insert or replace shifts for a month."""
-    conn = get_connection()
-    cur = conn.cursor()
-
     now = datetime.utcnow().isoformat()
 
     for s in shifts:
@@ -209,23 +166,11 @@ def save_shifts(shifts):
     conn.close()
 
 
-def load_shifts():
-    """Load all shifts from DB into Shift objects."""
+def load_shifts() -> List[Shift]:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT * FROM shifts ORDER BY start")
     rows = cur.fetchall()
     conn.close()
 
-    from core.models import Shift  # to avoid circular import
     return [Shift.from_dict(dict(r)) for r in rows]
-
-
-def delete_all_shifts():
-    """Clear shift table (when regenerating a month)."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM shifts")
-    conn.commit()
-    conn.close()
-
