@@ -1,143 +1,161 @@
 # core/workload_analyzer.py
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Dict, List
+
 from core.models import Doctor, Shift, Assignment
 
 
-# default rest rule in hours (can be made configurable later)
-REST_REQUIRED_HOURS = 18
+# ==========================================================
+# Workload data container
+# ==========================================================
 
-
+@dataclass
 class DoctorWorkload:
-    """
-    Summary metrics for each doctor after roster generation.
-    """
+    total_hours: float = 0.0
+    total_shifts: int = 0
+    night_shifts: int = 0
+    weekend_shifts: int = 0
 
-    def __init__(self):
-        self.total_shifts = 0
-        self.total_hours = 0.0
-        self.night_shifts = 0
-        self.weekend_shifts = 0
-        self.consecutive_days = 0
-        self.consecutive_nights = 0
-        self.intensity_sum = 0
-        self.last_shift_end = None
+    consecutive_days: int = 0
+    consecutive_nights: int = 0
 
-        # Rule-related
-        self.rest_violations = 0
-        self.rule_flags = []  # list of text warnings
+    rest_violations: int = 0
 
-        # Burnout
-        self.burnout_score = 0.0
+    burnout_score: float = 0.0
 
 
-def calculate_burnout(intensity_sum: int, night_shifts: int,
-                      consecutive_nights: int, total_hours: float) -> float:
-    """
-    Simple burnout model:
-    - intensity_sum: base fatigue from shift difficulty
-    - night_shifts: weighted higher
-    - consecutive_nights: penalised heavily
-    - total_hours: overall load
-    Outputs a score roughly 0–100 (clamped).
-    """
+# ==========================================================
+# Helper functions
+# ==========================================================
 
-    score = (
-        intensity_sum * 1.0 +
-        night_shifts * 2.0 +
-        consecutive_nights * 4.0 +
-        (total_hours / 10.0)  # each 10h adds 1 point
-    )
+def _hours_between(start: datetime, end: datetime) -> float:
+    return (end - start).total_seconds() / 3600
 
-    return min(100.0, round(score, 1))
 
+def _date_key(dt: datetime) -> str:
+    """Convert datetime to YYYY-MM-DD string."""
+    return dt.date().isoformat()
+
+
+# ==========================================================
+# MAIN ANALYSIS FUNCTION
+# ==========================================================
 
 def analyze_workload(
     doctors: List[Doctor],
     shifts: List[Shift],
     assignments: List[Assignment],
+    rest_hours_required: int = 18,
 ) -> Dict[str, DoctorWorkload]:
     """
-    Computes workload summary for each doctor.
-
-    Returns:
-        workload: dict of doctor_id -> DoctorWorkload
+    Analyze total shifts, hours, night/weekend load, rest violations,
+    consecutive days/nights, and burnout score per doctor.
     """
 
-    # Lookups
+    workload = {doc.id: DoctorWorkload() for doc in doctors}
+
+    # Build shift lookup
     shift_map = {s.id: s for s in shifts}
-    doctor_ids = {d.id for d in doctors}
 
-    workload: Dict[str, DoctorWorkload] = {
-        d.id: DoctorWorkload() for d in doctors
-    }
-
-    # Group shifts by doctor
-    assignments_by_doctor: Dict[str, List[Shift]] = {d: [] for d in doctor_ids}
-
+    # Group assignments per doctor
+    doctor_assignments: Dict[str, List[Assignment]] = {doc.id: [] for doc in doctors}
     for a in assignments:
-        if a.doctor_id in doctor_ids and a.shift_id in shift_map:
-            assignments_by_doctor[a.doctor_id].append(shift_map[a.shift_id])
+        if a.doctor_id in doctor_assignments:
+            doctor_assignments[a.doctor_id].append(a)
 
-    # Sort shifts by time and compute metrics
-    for doc_id, shift_list in assignments_by_doctor.items():
-        w = workload[doc_id]
+    # Analyze each doctor individually
+    for doc in doctors:
+        w = workload[doc.id]
+        assigned = doctor_assignments[doc.id]
 
-        shift_list.sort(key=lambda s: s.start)
+        # Sort shifts chronologically
+        assigned.sort(key=lambda a: shift_map[a.shift_id].start)
 
-        prev_shift = None
+        # Used to compute consecutive sequences
+        last_shift_end = None
+        last_shift_date = None
         day_streak = 0
         night_streak = 0
 
-        for shift in shift_list:
-            # ---- Basic counts ----
-            w.total_shifts += 1
-            duration = shift.end - shift.start
-            hours = duration.total_seconds() / 3600.0
-            w.total_hours += hours
+        for a in assigned:
+            s = shift_map[a.shift_id]
+            hours = _hours_between(s.start, s.end)
 
-            if shift.is_night:
+            # Basic counts
+            w.total_hours += hours
+            w.total_shifts += 1
+
+            if s.is_night:
                 w.night_shifts += 1
-            if shift.is_weekend:
+            if s.is_weekend:
                 w.weekend_shifts += 1
 
-            w.intensity_sum += shift.intensity
-
-            # ---- Rest period violations ----
-            if prev_shift:
-                rest = (shift.start - prev_shift.end).total_seconds() / 3600.0
-                if rest < REST_REQUIRED_HOURS:
+            # ------ Rest violation ------
+            if last_shift_end is not None:
+                hours_rest = _hours_between(last_shift_end, s.start)
+                if hours_rest < rest_hours_required:
                     w.rest_violations += 1
-                    w.rule_flags.append(
-                        f"Rest violation: only {round(rest, 1)}h between shifts "
-                        f"ending {prev_shift.end} and starting {shift.start}"
-                    )
 
-            # ---- Consecutive streaks ----
-            if prev_shift:
-                if shift.is_night and prev_shift.is_night:
-                    night_streak += 1
-                elif not shift.is_night and not prev_shift.is_night:
-                    day_streak += 1
+            # ------ Consecutive days / nights ------
+            shift_day = _date_key(s.start)
+
+            if last_shift_date == shift_day:
+                # Same day → does not count as new consecutive day
+                pass
+            else:
+                # New day:
+                if last_shift_date is None:
+                    day_streak = 1
                 else:
-                    day_streak = 0
-                    night_streak = 0
+                    prev_date = datetime.fromisoformat(last_shift_date)
+                    curr_date = s.start.date()
+                    if curr_date == (prev_date + timedelta(days=1)):
+                        day_streak += 1
+                    else:
+                        day_streak = 1
 
+            # Track night streak separately
+            if s.is_night:
+                night_streak += 1
+            else:
+                night_streak = 0
+
+            # Store for next iteration
+            last_shift_end = s.end
+            last_shift_date = shift_day
+
+            # Update worst-case streak observed
             w.consecutive_days = max(w.consecutive_days, day_streak)
             w.consecutive_nights = max(w.consecutive_nights, night_streak)
 
-            prev_shift = shift
+        # ======================================================
+        # Burnout Score Formula
+        # ======================================================
+        # Normalised components:
+        # - Hours load (scaled to 200h)
+        # - Night shift load (scaled to 10 nights)
+        # - Weekend load (scaled to 8 weekends)
+        # - Rest violations
+        # - Consecutive days
+        # - Consecutive nights
+        # ======================================================
 
-        if shift_list:
-            w.last_shift_end = shift_list[-1].end
+        hours_factor = min(w.total_hours / 200.0, 1.0) * 40
+        night_factor = min(w.night_shifts / 10.0, 1.0) * 20
+        weekend_factor = min(w.weekend_shifts / 8.0, 1.0) * 10
+        rest_factor = min(w.rest_violations / 5.0, 1.0) * 10
+        consec_days_factor = min(w.consecutive_days / 10.0, 1.0) * 10
+        consec_nights_factor = min(w.consecutive_nights / 4.0, 1.0) * 10
 
-        # ---- Burnout score ----
-        w.burnout_score = calculate_burnout(
-            w.intensity_sum,
-            w.night_shifts,
-            w.consecutive_nights,
-            w.total_hours,
+        w.burnout_score = (
+            hours_factor
+            + night_factor
+            + weekend_factor
+            + rest_factor
+            + consec_days_factor
+            + consec_nights_factor
         )
 
     return workload
