@@ -29,7 +29,6 @@ def generate_shifts_for_month(year: int, month: int, output_csv: str):
     for day in range(1, num_days + 1):
         date_obj = datetime(year, month, day)
         is_weekend = date_obj.weekday() >= 5
-
         patterns = WEEKEND_PATTERNS if is_weekend else WEEKDAY_PATTERNS
 
         for name, start, end, min_d, max_d, is_night, intensity in patterns:
@@ -58,6 +57,6 @@ def generate_shifts_for_month(year: int, month: int, output_csv: str):
     df.to_csv(output_csv, index=False)
     print(f"🔥 Generated {len(df)} shifts → {output_csv}")
 
-# Allow running directly
+# Allow direct running
 if __name__ == "__main__":
     generate_shifts_for_month(2025, 1, "data/shifts_sample.csv")
