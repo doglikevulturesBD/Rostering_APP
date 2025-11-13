@@ -10,13 +10,13 @@ from typing import List, Optional
 # ---------------------------------------------------------
 @dataclass
 class Doctor:
-    id: str
-    name: str
-    level: str                    # MO, Registrar, Consultant, CS
-    firm: Optional[int]           # optional grouping (e.g., Firm 1/2)
-    contract_hours_per_month: int
-    min_shifts_per_month: int
-    max_shifts_per_month: int
+    id: str                                # e.g. "D01"
+    name: str                              # Doctor name
+    level: str                             # MO, Registrar, Consultant, Community Service
+    firm: Optional[int]                    # ED Firm/team (optional)
+    contract_hours_per_month: int          # e.g. 175
+    min_shifts_per_month: int              # e.g. 16
+    max_shifts_per_month: int              # e.g. 18
 
 
 # ---------------------------------------------------------
@@ -24,24 +24,32 @@ class Doctor:
 # ---------------------------------------------------------
 @dataclass
 class Shift:
-    id: str                       # "S0001"
-    name: str                     # "WKD_07-18_03"
-    start: datetime               # timestamp
+    id: str                                # "S0001"
+    name: str                              # "WKD_07-18_01"
+    start: datetime                        # Full datetime
     end: datetime
-    is_weekend: bool
-    is_night: bool
-    intensity: int                # 1–5, for burnout modelling
-    min_doctors: int
-    max_doctors: int
+    is_weekend: bool                       # weekend flag
+    is_night: bool                         # night shift flag
+    intensity: int                         # 1–5 (used later for burnout models)
+    min_doctors: int                       # required minimum coverage
+    max_doctors: int                       # allowed maximum coverage
 
     @staticmethod
     def from_dict(row: dict) -> "Shift":
         """
-        Convert a dict (e.g. from pandas DataFrame) into a Shift dataclass.
-        This version is robust and accepts multiple column names.
+        Converts a CSV row or DB row into a Shift dataclass.
+        This is robust and allows multiple naming conventions.
+        Expected keys may include:
+        - id or shift_id
+        - name or shift_name
+        - start or start_time
+        - end or end_time
+        - is_weekend
+        - is_night
+        - intensity
+        - min_doctors / max_doctors
         """
-
-        # ---- ID ----
+        # ---- Shift ID ----
         sid = (
             row.get("id")
             or row.get("shift_id")
@@ -60,34 +68,34 @@ class Shift:
         )
 
         # ---- Start datetime ----
-        start_str = (
+        start_raw = (
             row.get("start")
             or row.get("start_time")
             or row.get("Start")
             or row.get("startTime")
         )
-        if start_str is None:
+        if start_raw is None:
             raise ValueError(f"Missing 'start' field in row: {row}")
 
-        start_dt = datetime.fromisoformat(str(start_str))
+        start_dt = datetime.fromisoformat(str(start_raw))
 
         # ---- End datetime ----
-        end_str = (
+        end_raw = (
             row.get("end")
             or row.get("end_time")
             or row.get("End")
             or row.get("endTime")
         )
-        if end_str is None:
+        if end_raw is None:
             raise ValueError(f"Missing 'end' field in row: {row}")
 
-        end_dt = datetime.fromisoformat(str(end_str))
+        end_dt = datetime.fromisoformat(str(end_raw))
 
         # ---- Boolean flags ----
         is_weekend = bool(int(row.get("is_weekend", 0)))
         is_night = bool(int(row.get("is_night", 0)))
 
-        # ---- Integers with fallback ----
+        # ---- Integer values ----
         intensity = int(row.get("intensity", 3))
         min_docs = int(row.get("min_doctors", 1))
         max_docs = int(row.get("max_doctors", 1))
@@ -106,12 +114,12 @@ class Shift:
 
 
 # ---------------------------------------------------------
-# Assignment + Roster containers
+# Assignment + Roster Models
 # ---------------------------------------------------------
 @dataclass
 class Assignment:
-    doctor_id: str               # e.g., "D01"
-    shift_id: str                # e.g., "S0042"
+    doctor_id: str                         # e.g. "D03"
+    shift_id: str                          # e.g. "S0041"
 
 
 @dataclass
