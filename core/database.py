@@ -40,9 +40,34 @@ def init_db():
         """
     )
 
+    # Shifts table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shifts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            start TEXT NOT NULL,
+            end TEXT NOT NULL,
+            is_weekend INTEGER NOT NULL,
+            is_night INTEGER NOT NULL,
+            intensity INTEGER NOT NULL,
+            min_doctors INTEGER NOT NULL,
+            max_doctors INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+
+
+    
     # We'll add shifts, assignments, leave, etc. later
     conn.commit()
     conn.close()
+
+
+
 
 
 def _row_to_doctor(row: sqlite3.Row) -> Doctor:
