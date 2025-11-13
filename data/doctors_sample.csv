@@ -1,5 +1,11 @@
 id,name,level,firm,contract_hours,min_shifts,max_shifts
-D1,Dr Alpha,MO,1,175,16,18
-D2,Dr Beta,MO,1,175,16,18
-D3,Dr Gamma,Reg,2,175,16,18
-
+D01,Dr Alpha,MO,1,175,16,18
+D02,Dr Bravo,MO,1,175,16,18
+D03,Dr Charlie,MO,1,175,16,18
+D04,Dr Delta,Reg,2,175,16,18
+D05,Dr Echo,Reg,2,175,16,18
+D06,Dr Foxtrot,MO,3,175,16,18
+D07,Dr Golf,MO,3,175,16,18
+D08,Dr Hotel,MO,4,175,16,18
+D09,Dr India,MO,4,175,16,18
+D10,Dr Juliet,Consultant,1,160,10,12
