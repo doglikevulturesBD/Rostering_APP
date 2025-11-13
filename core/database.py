@@ -1,7 +1,5 @@
 # core/database.py
 
-# core/database.py
-
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -14,11 +12,11 @@ DB_PATH = Path("data/ed_roster.db")
 
 
 # ==========================================================
-#  CONNECTION + INITIALIZATION
+# CONNECTION & INITIALIZATION
 # ==========================================================
 
 def get_connection() -> sqlite3.Connection:
-    """Ensures DB folder exists and returns a connection."""
+    """Ensure DB folder exists and return a connection."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -26,13 +24,11 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """Initializes the doctors and shifts tables."""
+    """Creates tables if they do not exist."""
     conn = get_connection()
     cur = conn.cursor()
 
-    # -------------------------
-    # Doctors Table
-    # -------------------------
+    # ------------------------- Doctors -------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doctors (
@@ -51,9 +47,7 @@ def init_db():
         """
     )
 
-    # -------------------------
-    # Shifts Table
-    # -------------------------
+    # ------------------------- Shifts -------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
@@ -71,16 +65,47 @@ def init_db():
         """
     )
 
+    # ------------------------- Leave -------------------------
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leave_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_external_id TEXT NOT NULL,
+            leave_type TEXT NOT NULL,        -- "annual" or "sick"
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
+        )
+        """
+    )
+
+    # ------------------------- Preferences -------------------------
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doctor_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_external_id TEXT NOT NULL,
+            preference_type TEXT NOT NULL,   -- e.g. "avoid_nights", "prefer_early", "unavailable"
+            start_date TEXT,
+            end_date TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
 
 # ==========================================================
-#  DOCTOR HELPERS
+# DOCTOR HELPERS
 # ==========================================================
 
 def _row_to_doctor(row: sqlite3.Row) -> Doctor:
-    """Convert DB row → Doctor object."""
     return Doctor(
         id=row["external_id"],
         name=row["name"],
@@ -93,17 +118,15 @@ def _row_to_doctor(row: sqlite3.Row) -> Doctor:
 
 
 def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> Doctor:
-    """
-    Creates a doctor and returns a full Doctor object.
-    """
+    """Create a doctor and return the object."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
 
-    # Insert placeholder external_id until we have the DB auto-ID
+    # Insert placeholder external_id first
     cur.execute(
         """
-        INSERT INTO doctors
+        INSERT INTO doctors 
         (external_id, name, level, firm, contract_hours, min_shifts, max_shifts,
          active, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
@@ -114,7 +137,7 @@ def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> 
     new_id = cur.lastrowid
     external_id = f"D{new_id:02d}"
 
-    # Update external_id
+    # Set correct external_id
     cur.execute(
         "UPDATE doctors SET external_id=?, updated_at=? WHERE id=?",
         (external_id, now, new_id),
@@ -123,7 +146,6 @@ def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> 
     conn.commit()
     conn.close()
 
-    # Return Doctor object
     return Doctor(
         id=external_id,
         name=name,
@@ -136,23 +158,20 @@ def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> 
 
 
 def get_all_doctors(active_only: bool = True) -> List[Doctor]:
-    """Loads all doctors, ordered by DB ID."""
     conn = get_connection()
     cur = conn.cursor()
 
     if active_only:
-        cur.execute("SELECT * FROM doctors WHERE active = 1 ORDER BY id")
+        cur.execute("SELECT * FROM doctors WHERE active=1 ORDER BY id")
     else:
         cur.execute("SELECT * FROM doctors ORDER BY id")
 
     rows = cur.fetchall()
     conn.close()
-
     return [_row_to_doctor(r) for r in rows]
 
 
 def update_doctor_hours_and_shifts(external_id, contract_hours, min_shifts, max_shifts):
-    """Update contract hours and shift requirements for a doctor."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
@@ -160,11 +179,8 @@ def update_doctor_hours_and_shifts(external_id, contract_hours, min_shifts, max_
     cur.execute(
         """
         UPDATE doctors
-        SET contract_hours = ?,
-            min_shifts = ?,
-            max_shifts = ?,
-            updated_at = ?
-        WHERE external_id = ?
+        SET contract_hours=?, min_shifts=?, max_shifts=?, updated_at=?
+        WHERE external_id=?
         """,
         (contract_hours, min_shifts, max_shifts, now, external_id),
     )
@@ -174,18 +190,12 @@ def update_doctor_hours_and_shifts(external_id, contract_hours, min_shifts, max_
 
 
 def deactivate_doctor(external_id):
-    """Soft-delete a doctor by marking them inactive."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
 
     cur.execute(
-        """
-        UPDATE doctors
-        SET active = 0,
-            updated_at = ?
-        WHERE external_id = ?
-        """,
+        "UPDATE doctors SET active=0, updated_at=? WHERE external_id=?",
         (now, external_id),
     )
 
@@ -194,11 +204,10 @@ def deactivate_doctor(external_id):
 
 
 # ==========================================================
-#  SHIFT HELPERS
+# SHIFT HELPERS
 # ==========================================================
 
 def delete_all_shifts():
-    """Remove all shift entries."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM shifts")
@@ -207,7 +216,6 @@ def delete_all_shifts():
 
 
 def save_shifts(shifts: List[Shift]):
-    """Save a list of Shift objects into the DB (overwrite existing)."""
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
@@ -239,32 +247,115 @@ def save_shifts(shifts: List[Shift]):
 
 
 def load_shifts() -> List[Shift]:
-    """Load all shifts from DB and return as Shift objects."""
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute("SELECT * FROM shifts ORDER BY start")
     rows = cur.fetchall()
-
     conn.close()
-
     return [Shift.from_dict(dict(r)) for r in rows]
 
 
+# ==========================================================
+# LEAVE HELPERS
+# ==========================================================
 
-# Leave Table
-cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS leave_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        doctor_external_id TEXT NOT NULL,
-        leave_type TEXT NOT NULL, -- "sick" or "annual"
-        start_date TEXT NOT NULL,
-        end_date TEXT NOT NULL,
-        reason TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
+def create_leave_request(doctor_id, leave_type, start_date, end_date, reason=""):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO leave_requests
+        (doctor_external_id, leave_type, start_date, end_date, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (doctor_id, leave_type, start_date, end_date, reason),
     )
-    """
-)
+
+    conn.commit()
+    conn.close()
+
+
+def get_leave_for_doctor(doctor_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM leave_requests WHERE doctor_external_id=? ORDER BY start_date",
+        (doctor_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_leave():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM leave_requests ORDER BY start_date")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_leave(leave_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM leave_requests WHERE id=?", (leave_id,))
+    conn.commit()
+    conn.close()
+
+
+# ==========================================================
+# PREFERENCES HELPERS
+# ==========================================================
+
+def create_preference(doctor_id, preference_type, start_date, end_date, notes=""):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO doctor_preferences
+        (doctor_external_id, preference_type, start_date, end_date, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (doctor_id, preference_type, start_date, end_date, notes),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_preferences_for_doctor(doctor_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM doctor_preferences
+        WHERE doctor_external_id=?
+        ORDER BY start_date
+        """,
+        (doctor_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_preferences():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM doctor_preferences ORDER BY start_date")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_preference(pref_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM doctor_preferences WHERE id=?", (pref_id,))
+    conn.commit()
+    conn.close()
+
 
