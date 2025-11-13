@@ -1,55 +1,52 @@
-# pages/3_🧠_Burnout_Monitor.py
+# pages/3_Burnout_Overview.py
+
 import streamlit as st
 import pandas as pd
 
-from core.burnout.burnout_index import compute_burnout_scores
+from core.workload_analyzer import analyze_workload
 
-st.set_page_config(page_title="Burnout Monitor", layout="wide")
-st.title("🧠 Burnout Monitor")
+st.set_page_config(page_title="Burnout Overview", layout="wide")
+st.title("🔥 Burnout Overview")
 
-if "roster" not in st.session_state:
-    st.warning("No roster found. Please generate one in the Roster Builder page.")
+roster = st.session_state.get("roster", None)
+
+if roster is None:
+    st.info("No roster available. Please generate a roster first.")
     st.stop()
 
-roster = st.session_state["roster"]
-
-scores = compute_burnout_scores(
-    roster.doctors,
-    roster.shifts,
-    roster.assignments,
-)
+workload = analyze_workload(roster.doctors, roster.shifts, roster.assignments)
 
 rows = []
-id_to_name = {d.id: d.name for d in roster.doctors}
-
-for doc_id, info in scores.items():
-    row = {
-        "doctor_id": doc_id,
-        "name": id_to_name.get(doc_id, doc_id),
-        "burnout_score": info["score"],
-        "risk_level": info["label"],
-        **info["details"],
-    }
-    rows.append(row)
+for doc in roster.doctors:
+    w = workload[doc.id]
+    rows.append(
+        {
+            "Doctor": doc.name,
+            "Level": doc.level,
+            "Shifts": w.total_shifts,
+            "Hours": round(w.total_hours, 1),
+            "Night Shifts": w.night_shifts,
+            "Weekend Shifts": w.weekend_shifts,
+            "Consec Nights": w.consecutive_nights,
+            "Intensity Sum": w.intensity_sum,
+            "Burnout Score": w.burnout_score,
+            "Rest Violations": w.rest_violations,
+        }
+    )
 
 df = pd.DataFrame(rows)
+df = df.sort_values("Burnout Score", ascending=False)
 
-st.subheader("Burnout Index by Doctor")
+st.subheader("Doctors Sorted by Burnout Score")
+st.dataframe(df, use_container_width=True)
 
-# colour code risk
-def highlight_risk(row):
-    color = ""
-    if row["risk_level"] == "low":
-        color = "background-color: #d4edda"
-    elif row["risk_level"] == "medium":
-        color = "background-color: #fff3cd"
-    else:
-        color = "background-color: #f8d7da"
-    return [color] * len(row)
+# Highlight high risk
+st.subheader("High-Risk Doctors (Burnout Score ≥ 70)")
 
-st.dataframe(df.style.apply(highlight_risk, axis=1), use_container_width=True)
+high_risk = df[df["Burnout Score"] >= 70.0]
 
-# optional: show currently on shift (very simple placeholder)
-st.markdown("### Doctors likely currently on duty (simplified)")
-st.write("You can later add real-time filtering by current time here.")
-
+if high_risk.empty:
+    st.write("✅ No doctors currently flagged as high burnout risk.")
+else:
+    st.write("⚠️ The following doctors are at high burnout risk:")
+    st.dataframe(high_risk, use_container_width=True)
