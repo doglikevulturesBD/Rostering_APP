@@ -171,3 +171,61 @@ def deactivate_doctor(external_id: str):
     )
     conn.commit()
     conn.close()
+
+# ------------------------------------------------------------
+# SHIFT DB FUNCTIONS
+# ------------------------------------------------------------
+
+def save_shifts(shifts):
+    """Insert or replace shifts for a month."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    now = datetime.utcnow().isoformat()
+
+    for s in shifts:
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO shifts
+            (id, name, start, end, is_weekend, is_night,
+             intensity, min_doctors, max_doctors, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                s.id,
+                s.name,
+                s.start.isoformat(),
+                s.end.isoformat(),
+                1 if s.is_weekend else 0,
+                1 if s.is_night else 0,
+                s.intensity,
+                s.min_doctors,
+                s.max_doctors,
+                now,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def load_shifts():
+    """Load all shifts from DB into Shift objects."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM shifts ORDER BY start")
+    rows = cur.fetchall()
+    conn.close()
+
+    from core.models import Shift  # to avoid circular import
+    return [Shift.from_dict(dict(r)) for r in rows]
+
+
+def delete_all_shifts():
+    """Clear shift table (when regenerating a month)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM shifts")
+    conn.commit()
+    conn.close()
+
