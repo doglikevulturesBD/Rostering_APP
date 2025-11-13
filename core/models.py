@@ -1,42 +1,53 @@
-# core/models.py
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import List, Optional
+from dataclasses import dataclass
+from datetime import datetime, time
+from typing import Optional
+
 
 @dataclass
 class Doctor:
     id: str
     name: str
-    level: str              # "MO", "Reg", "Consultant", etc.
-    firm: Optional[int] = None
-    contract_hours_per_month: int = 175
-    min_shifts_per_month: int = 16
-    max_shifts_per_month: int = 18
+    level: str
+    firm: Optional[int]
+    contract_hours_per_month: int
+    min_shifts_per_month: int
+    max_shifts_per_month: int
+
 
 @dataclass
 class Shift:
-    id: str
-    name: str
-    start: datetime
-    end: datetime
-    is_weekend: bool
-    is_night: bool
-    intensity: int = 3       # 1–5 for burnout weighting
-    min_doctors: int = 1
-    max_doctors: int = 2
-
-    @property
-    def duration_hours(self) -> float:
-        return (self.end - self.start).total_seconds() / 3600.0
-
-@dataclass
-class Assignment:
-    doctor_id: str
     shift_id: str
+    date: datetime
+    start: time
+    end: time
+    hours: float
+    shift_type: str       # e.g. "DAY", "NIGHT", "WEEKEND"
+    weekday: int
+    max_doctors: int      # e.g. 1, 2, 3
+    min_doctors: int      # later you will use this
+    is_night: bool
+    is_weekend: bool
 
-@dataclass
-class Roster:
-    doctors: List[Doctor]
-    shifts: List[Shift]
-    assignments: List[Assignment] = field(default_factory=list)
+    @staticmethod
+    def from_dict(row: dict) -> "Shift":
+        """Convert a CSV/dict row into a Shift dataclass."""
+        # Expected keys: shift_id, date, start, end, hours, shift_type, weekday, max_doctors, min_doctors
 
+        start = datetime.strptime(row["start"], "%H:%M").time()
+        end = datetime.strptime(row["end"], "%H:%M").time()
+
+        date = datetime.strptime(row["date"], "%Y-%m-%d")
+
+        return Shift(
+            shift_id=row["shift_id"],
+            date=date,
+            start=start,
+            end=end,
+            hours=float(row["hours"]),
+            shift_type=row["shift_type"],
+            weekday=int(row["weekday"]),
+            max_doctors=int(row.get("max_doctors", 1)),
+            min_doctors=int(row.get("min_doctors", 1)),
+            is_night=row["shift_type"].upper() == "NIGHT",
+            is_weekend=date.weekday() >= 5,
+        )
