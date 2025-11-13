@@ -1,1 +1,5 @@
+id,name,level,firm,contract_hours,min_shifts,max_shifts
+D1,Dr Alpha,MO,1,175,16,18
+D2,Dr Beta,MO,1,175,16,18
+D3,Dr Gamma,Reg,2,175,16,18
 
