@@ -8,25 +8,16 @@ import pulp
 from core.models import Doctor, Shift, Assignment, Roster
 
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-
 def _hours_between(start: datetime, end: datetime) -> float:
     return (end - start).total_seconds() / 3600.0
 
 
 def _build_leave_map(leave_rows) -> Dict[str, List[Tuple[date, date]]]:
-    """
-    Convert DB leave rows into:
-        doctor_id -> list of (start_date, end_date) as date objects.
-    """
     leave_map: Dict[str, List[Tuple[date, date]]] = {}
     if not leave_rows:
         return leave_map
 
     for row in leave_rows:
-        # row is sqlite Row or dict-like
         doc_id = row["doctor_external_id"]
         start = datetime.fromisoformat(row["start_date"]).date()
         end = datetime.fromisoformat(row["end_date"]).date()
@@ -36,32 +27,22 @@ def _build_leave_map(leave_rows) -> Dict[str, List[Tuple[date, date]]]:
 
 
 def _build_conflict_pairs(shifts: List[Shift], rest_hours_required: float) -> List[Tuple[int, int]]:
-    """
-    Precompute shift index pairs (i, j) that conflict for a *single doctor*,
-    either because:
-      - The times overlap, OR
-      - The rest between them is below rest_hours_required.
-    """
     conflict_pairs: List[Tuple[int, int]] = []
-
     n = len(shifts)
+
     for i in range(n):
         for j in range(i + 1, n):
             s1 = shifts[i]
             s2 = shifts[j]
 
-            # Overlap if neither ends before the other starts
             overlapping = not (s1.end <= s2.start or s2.end <= s1.start)
-
             insufficient_rest = False
 
-            # rest from s1 to s2
             if s1.end <= s2.start:
                 rest_12 = _hours_between(s1.end, s2.start)
                 if rest_12 < rest_hours_required:
                     insufficient_rest = True
 
-            # rest from s2 to s1
             if s2.end <= s1.start:
                 rest_21 = _hours_between(s2.end, s1.start)
                 if rest_21 < rest_hours_required:
@@ -73,160 +54,89 @@ def _build_conflict_pairs(shifts: List[Shift], rest_hours_required: float) -> Li
     return conflict_pairs
 
 
-# ---------------------------------------------------------
-# MAIN OPTIMISER (hard constraints only)
-# ---------------------------------------------------------
-
 def generate_optimized_roster(
     doctors: List[Doctor],
     shifts: List[Shift],
     leave_rows=None,
-    rest_hours_required: float = 18.0,
+    rest_hours_required: float = 11.0,
 ) -> Roster:
-    """
-    Build an optimised roster using PuLP (MILP) with *hard constraints only*.
-
-    Hard constraints enforced:
-      - Each shift has between min_doctors and max_doctors assigned
-      - A doctor cannot work overlapping shifts
-      - A doctor must have at least rest_hours_required hours between shifts
-      - A doctor cannot work on leave days
-      - A doctor must have between min_shifts_per_month and max_shifts_per_month
-
-    No soft constraints or fairness yet (Phase 2).
-    """
+    """Optimised roster using PuLP (hard constraints only)."""
 
     if not doctors or not shifts:
-        # Nothing to optimise
         return Roster(doctors=doctors, shifts=shifts, assignments=[])
-
-    # Index maps for convenience
-    doctor_index = {d.id: i for i, d in enumerate(doctors)}
-    shift_index = {s.id: j for j, s in enumerate(shifts)}
 
     num_doctors = len(doctors)
     num_shifts = len(shifts)
 
-    # Leave map
     leave_map = _build_leave_map(leave_rows or [])
-
-    # Conflicting shift pairs (for any single doctor)
     conflict_pairs = _build_conflict_pairs(shifts, rest_hours_required)
 
-    # -------------------------------------------------
-    # Model
-    # -------------------------------------------------
     model = pulp.LpProblem("ED_Roster_Optimisation", pulp.LpMinimize)
 
-    # Decision variables: x[d, s] = 1 if doctor d works shift s
+    # Decision vars x[d,s] ∈ {0,1}
     x: Dict[Tuple[int, int], pulp.LpVariable] = {}
     for d_idx in range(num_doctors):
         for s_idx in range(num_shifts):
-            doc_id = doctors[d_idx].id
-            shift_id = shifts[s_idx].id
             x[(d_idx, s_idx)] = pulp.LpVariable(
-                f"x_{doc_id}_{shift_id}", lowBound=0, upBound=1, cat=pulp.LpBinary
+                f"x_{doctors[d_idx].id}_{shifts[s_idx].id}",
+                lowBound=0,
+                upBound=1,
+                cat=pulp.LpBinary,
             )
 
-    # -------------------------------------------------
-    # 1. Shift staffing constraints (min / max doctors)
-    # -------------------------------------------------
+    # 1. Shift staffing
     for s_idx, sh in enumerate(shifts):
         assigned = [x[(d_idx, s_idx)] for d_idx in range(num_doctors)]
         if sh.min_doctors is not None:
-            model += (
-                pulp.lpSum(assigned) >= sh.min_doctors,
-                f"shift_{sh.id}_min_staff",
-            )
+            model += pulp.lpSum(assigned) >= sh.min_doctors, f"shift_{sh.id}_min"
         if sh.max_doctors is not None:
-            model += (
-                pulp.lpSum(assigned) <= sh.max_doctors,
-                f"shift_{sh.id}_max_staff",
-            )
+            model += pulp.lpSum(assigned) <= sh.max_doctors, f"shift_{sh.id}_max"
 
-    # -------------------------------------------------
-    # 2. Doctor shift-count constraints (min / max per month)
-    # -------------------------------------------------
+    # 2. Doctor min/max shifts
     for d_idx, doc in enumerate(doctors):
-        doc_assignments = [x[(d_idx, s_idx)] for s_idx in range(num_shifts)]
-
-        if getattr(doc, "min_shifts_per_month", None) is not None:
+        doc_x = [x[(d_idx, s_idx)] for s_idx in range(num_shifts)]
+        if doc.min_shifts_per_month is not None:
             model += (
-                pulp.lpSum(doc_assignments) >= doc.min_shifts_per_month,
-                f"doctor_{doc.id}_min_shifts",
+                pulp.lpSum(doc_x) >= doc.min_shifts_per_month,
+                f"doc_{doc.id}_min",
+            )
+        if doc.max_shifts_per_month is not None:
+            model += (
+                pulp.lpSum(doc_x) <= doc.max_shifts_per_month,
+                f"doc_{doc.id}_max",
             )
 
-        if getattr(doc, "max_shifts_per_month", None) is not None:
-            model += (
-                pulp.lpSum(doc_assignments) <= doc.max_shifts_per_month,
-                f"doctor_{doc.id}_max_shifts",
-            )
-
-    # -------------------------------------------------
-    # 3. Conflict constraints (overlaps + insufficient rest)
-    # -------------------------------------------------
+    # 3. Conflicts (overlaps + rest)
     for d_idx, doc in enumerate(doctors):
         for (i, j) in conflict_pairs:
-            model += (
-                x[(d_idx, i)] + x[(d_idx, j)] <= 1,
-                f"conflict_{doc.id}_s{i}_s{j}",
-            )
+            model += x[(d_idx, i)] + x[(d_idx, j)] <= 1, f"conflict_{doc.id}_{i}_{j}"
 
-    # -------------------------------------------------
-    # 4. Leave constraints (no shifts during leave periods)
-    # -------------------------------------------------
+    # 4. Leave: no shifts during leave
     for d_idx, doc in enumerate(doctors):
-        doc_id = doc.id
-        leave_periods = leave_map.get(doc_id, [])
-        if not leave_periods:
+        periods = leave_map.get(doc.id, [])
+        if not periods:
             continue
 
         for s_idx, sh in enumerate(shifts):
             shift_day = sh.start.date()
-            # If shift_day falls in any leave period, forbid assignment
-            for (lv_start, lv_end) in leave_periods:
+            for (lv_start, lv_end) in periods:
                 if lv_start <= shift_day <= lv_end:
-                    model += (
-                        x[(d_idx, s_idx)] == 0,
-                        f"leave_{doc_id}_shift_{sh.id}",
-                    )
-                    break  # no need to check more periods for this shift
+                    model += x[(d_idx, s_idx)] == 0, f"leave_{doc.id}_{sh.id}"
+                    break
 
-    # -------------------------------------------------
-    # Objective: Just find *any* feasible solution for now.
-    # (Phase 2 will add fairness + burnout minimisation)
-    # -------------------------------------------------
+    # Objective: any feasible solution
     model += 0, "DummyObjective"
 
-    # -------------------------------------------------
-    # Solve
-    # -------------------------------------------------
     solver = pulp.PULP_CBC_CMD(msg=False)
-    result_status = model.solve(solver)
+    result = model.solve(solver)
 
-    if pulp.LpStatus[result_status] not in ("Optimal", "Feasible"):
-        raise RuntimeError(
-            f"No feasible roster found. Solver status: {pulp.LpStatus[result_status]}"
-        )
+    if pulp.LpStatus[result] not in ("Optimal", "Feasible"):
+        raise RuntimeError(f"No feasible roster. Status: {pulp.LpStatus[result]}")
 
-    # -------------------------------------------------
-    # Build assignments from solution
-    # -------------------------------------------------
     assignments: List[Assignment] = []
-
     for d_idx, doc in enumerate(doctors):
         for s_idx, sh in enumerate(shifts):
-            val = x[(d_idx, s_idx)].value()
-            if val is not None and val > 0.5:
-                assignments.append(
-                    Assignment(
-                        doctor_id=doc.id,
-                        shift_id=sh.id,
-                    )
-                )
+            if x[(d_idx, s_idx)].value() > 0.5:
+                assignments.append(Assignment(doctor_id=doc.id, shift_id=sh.id))
 
-    return Roster(
-        doctors=doctors,
-        shifts=shifts,
-        assignments=assignments,
-    )
+    return Roster(doctors=doctors, shifts=shifts, assignments=assignments)
