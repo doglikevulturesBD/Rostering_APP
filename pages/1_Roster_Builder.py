@@ -4,8 +4,9 @@ import streamlit as st
 import pandas as pd
 
 from core.generate_shifts import generate_shifts_for_month
-from core.database import load_shifts, get_all_doctors
+from core.database import load_shifts, get_all_doctors, get_all_leave
 from core.solver import generate_naive_roster
+from core.optimizer import generate_optimized_roster
 from core.workload_analyzer import analyze_workload
 
 st.set_page_config(page_title="Roster Builder", layout="wide")
@@ -65,17 +66,39 @@ else:
     st.dataframe(df_docs, use_container_width=True)
 
 # -----------------------------
-# 3. Generate Roster
+# 3. Choose Generation Mode
 # -----------------------------
 st.subheader("3. Generate Roster")
 
-if st.session_state["shifts"] and doctors:
+mode = st.radio(
+    "Generation mode",
+    ["Naive assignment", "Optimised (OR-Tools)"],
+    index=0,
+)
+
+shifts = st.session_state.get("shifts", None)
+
+if shifts and doctors:
     if st.button("Generate Roster"):
-        roster = generate_naive_roster(doctors, st.session_state["shifts"])
-        st.session_state["roster"] = roster
-        st.success("Roster generated!")
+        try:
+            if mode == "Naive assignment":
+                roster = generate_naive_roster(doctors, shifts)
+            else:
+                # Load leave for optimiser (hard constraints)
+                leave_rows = get_all_leave()
+                roster = generate_optimized_roster(
+                    doctors,
+                    shifts,
+                    leave_rows=leave_rows,
+                )
+
+            st.session_state["roster"] = roster
+            st.success(f"Roster generated using mode: {mode}")
+
+        except Exception as e:
+            st.error(f"Error generating roster: {e}")
 else:
-    st.info("You need shifts and doctors before generating a roster.")
+    st.info("You need both shifts and doctors before generating a roster.")
 
 # -----------------------------
 # 4. Display Assignments
@@ -83,7 +106,7 @@ else:
 if st.session_state["roster"]:
     roster = st.session_state["roster"]
 
-    st.subheader("Roster Assignments")
+    st.subheader("4. Roster Assignments")
 
     df_assign = pd.DataFrame(
         [
@@ -92,19 +115,21 @@ if st.session_state["roster"]:
         ]
     )
 
-    st.dataframe(df_assign, use_container_width=True)
-
-    st.download_button(
-        "⬇ Download Roster CSV",
-        df_assign.to_csv(index=False).encode("utf-8"),
-        file_name="roster_output.csv",
-        mime="text/csv",
-    )
+    if df_assign.empty:
+        st.warning("No assignments in roster (possibly no feasible solution).")
+    else:
+        st.dataframe(df_assign, use_container_width=True)
+        st.download_button(
+            "⬇ Download Roster CSV",
+            df_assign.to_csv(index=False).encode("utf-8"),
+            file_name="roster_output.csv",
+            mime="text/csv",
+        )
 
     # -----------------------------
     # 5. Workload + Burnout Summary
     # -----------------------------
-    st.subheader("Doctor Workload & Burnout Summary")
+    st.subheader("5. Doctor Workload & Burnout Summary")
 
     workload = analyze_workload(roster.doctors, roster.shifts, roster.assignments)
 
@@ -121,7 +146,7 @@ if st.session_state["roster"]:
                 "Consec Days": w.consecutive_days,
                 "Consec Nights": w.consecutive_nights,
                 "Rest Violations": w.rest_violations,
-                "Burnout Score": w.burnout_score,
+                "Burnout Score": round(w.burnout_score, 1),
             }
         )
 
@@ -131,13 +156,15 @@ if st.session_state["roster"]:
     # -----------------------------
     # 6. Warnings / Violations
     # -----------------------------
-    st.subheader("Warnings & Rest Violations")
+    st.subheader("6. Warnings & Rest Violations")
 
     for doc in roster.doctors:
         w = workload[doc.id]
-        if w.rule_flags:
-            with st.expander(f"{doc.name} — {len(w.rule_flags)} issues"):
-                for flag in w.rule_flags:
-                    st.write(f"⚠️ {flag}")
+        if w.rest_violations > 0:
+            st.write(
+                f"⚠️ {doc.name}: {w.rest_violations} rest violations, "
+                f"{w.consecutive_nights} consecutive nights, burnout {round(w.burnout_score,1)}"
+            )
         else:
-            st.write(f"✅ {doc.name} — No issues found")
+            st.write(f"✅ {doc.name}: No rest violations detected.")
+
