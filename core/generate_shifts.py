@@ -1,76 +1,103 @@
 # core/generate_shifts.py
 
-import pandas as pd
-from datetime import datetime, timedelta
-import calendar
+from datetime import datetime, timedelta, date
+import csv
 
-from core.models import Shift
-from core.database import save_shifts, delete_all_shifts
+from core.database import save_generated_shifts
 
-# Weekday patterns
-WEEKDAY_PATTERNS = [
-    ("WKD_07-18", "07:00", "18:00", 1, 2, False, 3),
-    ("WKD_08-30-18", "08:30", "18:00", 1, 2, False, 3),
-    ("WKD_09-20", "09:00", "20:00", 1, 1, False, 3),
-    ("WKD_11-22", "11:00", "22:00", 1, 2, False, 3),
-    ("WKD_14-01", "14:00", "01:00", 3, 4, True, 4),
-    ("WKD_22-09", "22:00", "09:00", 3, 3, True, 4),
+
+# ----------------------------------------------------
+# SHIFT TEMPLATES
+# ----------------------------------------------------
+
+WEEKDAY_TEMPLATE = [
+    ("07:00", "18:00", 1, 2),
+    ("08:30", "18:00", 1, 2),
+    ("09:00", "20:00", 1, 1),
+    ("11:00", "22:00", 1, 2),
+    # UPDATED
+    ("14:00", "01:00", 2, 3),   # was 3–4
+    ("22:00", "09:00", 2, 2),   # was 3
 ]
 
-# Weekend patterns
-WEEKEND_PATTERNS = [
-    ("WKE_07-19", "07:00", "19:00", 2, 2, False, 3),
-    ("WKE_09-21", "09:00", "21:00", 1, 1, False, 3),
-    ("WKE_11-23", "11:00", "23:00", 1, 1, False, 3),
-    ("WKE_13-01", "13:00", "01:00", 2, 2, True, 4),
-    ("WKE_21-09", "21:00", "09:00", 3, 3, True, 4),
+WEEKEND_TEMPLATE = [
+    ("07:00", "19:00", 2, 2),
+    ("09:00", "21:00", 1, 1),
+    ("11:00", "23:00", 1, 1),
+    ("13:00", "01:00", 2, 2),
+    ("21:00", "09:00", 2, 2),  # UPDATED: 3 → 2
 ]
 
 
-def generate_shifts_for_month(year: int, month: int, output_csv: str):
-    num_days = calendar.monthrange(year, month)[1]
-    rows = []
-    sid = 1
+# ----------------------------------------------------
+# SHIFT BUILDER
+# ----------------------------------------------------
 
-    for day in range(1, num_days + 1):
-        date_obj = datetime(year, month, day)
-        is_weekend = date_obj.weekday() >= 5
-        patterns = WEEKEND_PATTERNS if is_weekend else WEEKDAY_PATTERNS
+def build_shift(start_str, end_str, min_docs, max_docs, day):
+    """Return a dict representing a shift expanded for a specific date."""
+    start_dt = datetime.combine(day, datetime.strptime(start_str, "%H:%M").time())
+    end_dt_raw = datetime.combine(day, datetime.strptime(end_str, "%H:%M").time())
 
-        for name, start_s, end_s, min_d, max_d, is_night, intensity in patterns:
+    # handle midnight crossing
+    if end_dt_raw <= start_dt:
+        end_dt = end_dt_raw + timedelta(days=1)
+    else:
+        end_dt = end_dt_raw
 
-            start_dt = datetime.strptime(f"{year}-{month:02}-{day:02} {start_s}",
-                                         "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(f"{year}-{month:02}-{day:02} {end_s}",
-                                       "%Y-%m-%d %H:%M")
-            if end_dt <= start_dt:
-                end_dt += timedelta(days=1)
+    duration_hours = (end_dt - start_dt).total_seconds() / 3600
 
-            rows.append(
-                {
-                    "id": f"S{sid:04}",
-                    "name": f"{name}_{day:02}",
-                    "start": start_dt.isoformat(),
-                    "end": end_dt.isoformat(),
-                    "is_weekend": 1 if is_weekend else 0,
-                    "is_night": 1 if is_night else 0,
-                    "intensity": intensity,
-                    "min_doctors": min_d,
-                    "max_doctors": max_d,
-                }
-            )
-            sid += 1
+    return {
+        "date": day.isoformat(),
+        "start_time": start_dt.isoformat(),
+        "end_time": end_dt.isoformat(),
+        "duration_hours": duration_hours,
+        "min_doctors": min_docs,
+        "max_doctors": max_docs,
+        "is_weekend": 1 if day.weekday() >= 5 else 0,
+    }
 
-    # Save CSV
-    df = pd.DataFrame(rows)
-    df.to_csv(output_csv, index=False)
 
-    # Create Shift objects
-    shifts = [Shift.from_dict(r) for r in rows]
+def generate_shifts_for_month(year: int, month: int, csv_output_path: str):
+    """
+    Generate all weekday/weekend shifts for the given month,
+    write to CSV and DB.
+    """
+    # find number of days in month
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
 
-    # Save to DB
-    delete_all_shifts()
-    save_shifts(shifts)
+    num_days = (next_month - date(year, month, 1)).days
 
-    print(f"Generated {len(shifts)} shifts → saved CSV + DB")
+    shift_rows = []
+
+    for day_num in range(1, num_days + 1):
+        day = date(year, month, day_num)
+        template = WEEKEND_TEMPLATE if day.weekday() >= 5 else WEEKDAY_TEMPLATE
+
+        for (start, end, min_docs, max_docs) in template:
+            shift = build_shift(start, end, min_docs, max_docs, day)
+            shift_rows.append(shift)
+
+    # save to DB
+    save_generated_shifts(shift_rows)
+
+    # save to CSV for preview
+    fieldnames = [
+        "date",
+        "start_time",
+        "end_time",
+        "duration_hours",
+        "min_doctors",
+        "max_doctors",
+        "is_weekend",
+    ]
+
+    with open(csv_output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(shift_rows)
+
+    return shift_rows
 
