@@ -300,3 +300,100 @@ def delete_leave(leave_id: int):
     cur.execute("DELETE FROM leave_requests WHERE id = ?", (leave_id,))
     conn.commit()
     conn.close()
+
+# -------------------------------
+#   LOAD SHIFTS FROM DATABASE
+# -------------------------------
+def load_shifts():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT external_id, date, start_time, end_time, is_weekend
+        FROM shifts
+        ORDER BY date, start_time
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "external_id": r[0],
+            "date": r[1],
+            "start_time": r[2],
+            "end_time": r[3],
+            "is_weekend": r[4]
+        }
+        for r in rows
+    ]
+
+
+# -------------------------------
+#   LOAD ASSIGNMENTS (Doctor → Shift)
+# -------------------------------
+def load_assignments():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT doctor_external_id, shift_external_id
+        FROM assignments
+        ORDER BY shift_external_id
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "doctor": r[0],
+            "shift": r[1]
+        }
+        for r in rows
+    ]
+
+
+# -------------------------------
+#   GET ALL DOCTORS (safe version)
+# -------------------------------
+def get_all_doctors(active_only=True):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if active_only:
+        cur.execute("""
+            SELECT external_id, name, level, firm,
+                   contract_hours_per_month, 
+                   min_shifts_per_month, 
+                   max_shifts_per_month
+            FROM doctors
+            WHERE active = 1
+            ORDER BY name
+        """)
+    else:
+        cur.execute("""
+            SELECT external_id, name, level, firm,
+                   contract_hours_per_month, 
+                   min_shifts_per_month, 
+                   max_shifts_per_month
+            FROM doctors
+            ORDER BY name
+        """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "external_id": r[0],
+            "name": r[1],
+            "level": r[2],
+            "firm": r[3],
+            "contract_hours": r[4],
+            "min_shifts": r[5],
+            "max_shifts": r[6]
+        }
+        for r in rows
+    ]
+
