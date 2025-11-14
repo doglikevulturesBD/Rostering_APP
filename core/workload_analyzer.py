@@ -1,89 +1,183 @@
 # core/workload_analyzer.py
-
+from dataclasses import dataclass
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from core.models import Doctor, Shift, Assignment, DoctorWorkload
+from core.models import Doctor, Shift, Assignment
 
 
-def analyze_workload(
-    doctors: List[Doctor],
-    shifts: List[Shift],
-    assignments: List[Assignment],
-) -> Dict[str, DoctorWorkload]:
-    """Compute simple workload & burnout stats for each doctor."""
+@dataclass
+class WorkloadSummary:
+    doctor_id: str
+    total_shifts: int
+    total_hours: float
+    night_shifts: int
+    weekend_shifts: int
+    consecutive_days: int
+    consecutive_nights: int
+    rest_violations: int
+    burnout_score: float
 
-    shift_by_id = {s.id: s for s in shifts}
-    workload: Dict[str, DoctorWorkload] = {
-        d.id: DoctorWorkload(doctor_id=d.id) for d in doctors
-    }
 
-    # Group assignments per doctor
+def analyze_workload(doctors: List[Doctor], shifts: List[Shift], assignments: List[Assignment]):
+    # Map shift_id → shift
+    shift_map = {s.id: s for s in shifts}
+
+    # Group assignments by doctor
     doc_assignments: Dict[str, List[Shift]] = {d.id: [] for d in doctors}
     for a in assignments:
-        sh = shift_by_id.get(a.shift_id)
-        if sh:
-            doc_assignments[a.doctor_id].append(sh)
+        doc_assignments[a.doctor_id].append(shift_map[a.shift_id])
 
-    for doc in doctors:
-        wid = doc.id
-        w = workload[wid]
-        assigned_shifts = sorted(doc_assignments[wid], key=lambda s: s.start)
+    workload: Dict[str, WorkloadSummary] = {}
 
-        if not assigned_shifts:
-            continue
+    # Average hours across doctors (for fairness factor)
+    hours_per_doc = []
 
-        w.total_shifts = len(assigned_shifts)
-        w.total_hours = sum(s.duration_hours for s in assigned_shifts)
-        w.night_shifts = sum(1 for s in assigned_shifts if s.start.hour >= 21)
-        w.weekend_shifts = sum(1 for s in assigned_shifts if s.is_weekend)
+    # First pass – compute raw stats
+    temp_stats = {}
+    for d in doctors:
+        assigned = sorted(doc_assignments[d.id], key=lambda s: s.start)
 
-        # Consecutive days worked
-        dates = sorted({s.start.date() for s in assigned_shifts})
-        consec = 1
-        max_consec = 1
-        for i in range(1, len(dates)):
-            if (dates[i] - dates[i - 1]).days == 1:
-                consec += 1
-                max_consec = max(max_consec, consec)
-            else:
-                consec = 1
-        w.consecutive_days = max_consec
+        total_hours = sum(s.duration_hours for s in assigned)
+        hours_per_doc.append(total_hours)
 
-        # Consecutive nights
-        night_dates = sorted({s.start.date() for s in assigned_shifts if s.start.hour >= 21})
-        consec_n = 1
-        max_consec_n = 1
-        if night_dates:
-            for i in range(1, len(night_dates)):
-                if (night_dates[i] - night_dates[i - 1]).days == 1:
-                    consec_n += 1
-                    max_consec_n = max(max_consec_n, consec_n)
-                else:
-                    consec_n = 1
-        else:
-            max_consec_n = 0
-        w.consecutive_nights = max_consec_n
+        night_shifts = sum(1 for s in assigned if s.start.hour >= 21)
+        weekend_shifts = sum(1 for s in assigned if s.is_weekend)
 
-        # Rest violations (< 11 hours between shifts)
-        rest_violations = 0
-        for i in range(len(assigned_shifts) - 1):
-            s1 = assigned_shifts[i]
-            s2 = assigned_shifts[i + 1]
-            gap_hours = (s2.start - s1.end).total_seconds() / 3600.0
-            if gap_hours < 11:
-                rest_violations += 1
-        w.rest_violations = rest_violations
+        # sequential counting:
+        consec_days = _compute_consecutive_days(assigned)
+        consec_nights = _compute_consecutive_nights(assigned)
 
-        # Very simple burnout score
-        # You can refine later
-        w.burnout_score = (
-            w.total_hours / 10.0
-            + w.night_shifts * 2.0
-            + w.weekend_shifts * 1.5
-            + max(0, w.consecutive_nights - 2) * 3.0
-            + w.rest_violations * 5.0
+        # rest violations
+        rv = _compute_rest_violations(assigned)
+
+        temp_stats[d.id] = {
+            "assigned": assigned,
+            "hours": total_hours,
+            "nights": night_shifts,
+            "weekends": weekend_shifts,
+            "consec_days": consec_days,
+            "consec_nights": consec_nights,
+            "rest_violations": rv,
+        }
+
+    avg_hours = sum(hours_per_doc) / len(hours_per_doc) if hours_per_doc else 0
+
+    # Second pass – burnout scoring
+    for d in doctors:
+        st = temp_stats[d.id]
+        burnout = _compute_burnout_score(
+            hours=st["hours"],
+            contract_hours=d.contract_hours_per_month,
+            night_shifts=st["nights"],
+            weekend_shifts=st["weekends"],
+            consecutive_days=st["consec_days"],
+            consecutive_nights=st["consec_nights"],
+            rest_violations=st["rest_violations"],
+            avg_hours=avg_hours,
+        )
+
+        workload[d.id] = WorkloadSummary(
+            doctor_id=d.id,
+            total_shifts=len(temp_stats[d.id]["assigned"]),
+            total_hours=st["hours"],
+            night_shifts=st["nights"],
+            weekend_shifts=st["weekends"],
+            consecutive_days=st["consec_days"],
+            consecutive_nights=st["consec_nights"],
+            rest_violations=st["rest_violations"],
+            burnout_score=burnout,
         )
 
     return workload
 
+
+# ------------------------------------------
+# Helper functions
+# ------------------------------------------
+
+def _compute_consecutive_days(shifts):
+    if not shifts:
+        return 0
+
+    days = sorted({s.start.date() for s in shifts})
+    consec = 1
+    best = 1
+
+    for i in range(1, len(days)):
+        if (days[i] - days[i - 1]).days == 1:
+            consec += 1
+            best = max(best, consec)
+        else:
+            consec = 1
+    return best
+
+
+def _compute_consecutive_nights(shifts):
+    nights = [s.start.date() for s in shifts if s.start.hour >= 21]
+    nights = sorted(set(nights))
+    if not nights:
+        return 0
+
+    consec = 1
+    best = 1
+    for i in range(1, len(nights)):
+        if (nights[i] - nights[i - 1]).days == 1:
+            consec += 1
+            best = max(best, consec)
+        else:
+            consec = 1
+    return best
+
+
+def _compute_rest_violations(shifts):
+    shifts = sorted(shifts, key=lambda s: s.end)
+    violations = 0
+    for i in range(1, len(shifts)):
+        rest = (shifts[i].start - shifts[i - 1].end).total_seconds() / 3600
+        if rest < 11:
+            violations += 1
+    return violations
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def _compute_burnout_score(
+    hours,
+    contract_hours,
+    night_shifts,
+    weekend_shifts,
+    consecutive_days,
+    consecutive_nights,
+    rest_violations,
+    avg_hours,
+):
+    # Factor scaling
+    hours_factor = clamp((hours / contract_hours) * 100, 0, 100) if contract_hours else 0
+    night_factor = clamp(night_shifts * 33, 0, 100)  # 3 nights ~ 100
+    weekend_factor = clamp(weekend_shifts * 33, 0, 100)
+    consec_days_factor = 100 if consecutive_days >= 6 else \
+                         75 if consecutive_days == 5 else \
+                         50 if consecutive_days == 4 else \
+                         10
+    consec_nights_factor = 100 if consecutive_nights >= 3 else \
+                           70 if consecutive_nights == 2 else \
+                           40 if consecutive_nights == 1 else \
+                           10
+    rest_factor = min(rest_violations * 25, 100)
+
+    fairness_factor = clamp(abs(hours - avg_hours) * 3, 0, 100)
+
+    score = (
+        0.25 * hours_factor
+        + 0.20 * night_factor
+        + 0.15 * weekend_factor
+        + 0.15 * consec_days_factor
+        + 0.10 * consec_nights_factor
+        + 0.10 * rest_factor
+        + 0.05 * fairness_factor
+    )
+
+    return round(score, 2)
