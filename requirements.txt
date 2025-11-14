@@ -1,4 +1,4 @@
 streamlit
 pandas
 altair
-ortools==9.9.3963
+pulp
