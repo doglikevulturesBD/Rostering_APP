@@ -1,5 +1,3 @@
-# pages/1_Roster_Builder.py
-
 import streamlit as st
 import pandas as pd
 
@@ -30,13 +28,16 @@ if st.button("Generate Shifts"):
     output = "data/generated_shifts.csv"
     generate_shifts_for_month(int(year), int(month), output)
 
-    # Load from DB to ensure DB & UI aligned
+    # Load from DB so UI uses the same data as optimiser
     shifts = load_shifts()
     st.session_state["shifts"] = shifts
 
     st.success(f"Generated & saved {len(shifts)} shifts.")
-    st.write("Preview of CSV:")
-    st.dataframe(pd.read_csv(output).head(), use_container_width=True)
+    try:
+        st.write("Preview of CSV:")
+        st.dataframe(pd.read_csv(output).head(), width="stretch")
+    except Exception:
+        st.info("Could not read CSV preview, but shifts were saved to DB.")
 
 # -----------------------------
 # 2. Load Doctors
@@ -63,7 +64,7 @@ else:
             for d in doctors
         ]
     )
-    st.dataframe(df_docs, use_container_width=True)
+    st.dataframe(df_docs, width="stretch")
 
 # -----------------------------
 # 3. Choose Generation Mode
@@ -72,7 +73,7 @@ st.subheader("3. Generate Roster")
 
 mode = st.radio(
     "Generation mode",
-    ["Naive assignment", "Optimised (OR-Tools)"],
+    ["Naive assignment", "Optimised (PuLP)"],
     index=0,
 )
 
@@ -84,7 +85,6 @@ if shifts and doctors:
             if mode == "Naive assignment":
                 roster = generate_naive_roster(doctors, shifts)
             else:
-                # Load leave for optimiser (hard constraints)
                 leave_rows = get_all_leave()
                 roster = generate_optimized_roster(
                     doctors,
@@ -118,7 +118,7 @@ if st.session_state["roster"]:
     if df_assign.empty:
         st.warning("No assignments in roster (possibly no feasible solution).")
     else:
-        st.dataframe(df_assign, use_container_width=True)
+        st.dataframe(df_assign, width="stretch")
         st.download_button(
             "⬇ Download Roster CSV",
             df_assign.to_csv(index=False).encode("utf-8"),
@@ -151,10 +151,10 @@ if st.session_state["roster"]:
         )
 
     df_work = pd.DataFrame(rows)
-    st.dataframe(df_work, use_container_width=True)
+    st.dataframe(df_work, width="stretch")
 
     # -----------------------------
-    # 6. Warnings / Violations
+    # 6. Simple Rest Violation Warnings
     # -----------------------------
     st.subheader("6. Warnings & Rest Violations")
 
@@ -163,7 +163,8 @@ if st.session_state["roster"]:
         if w.rest_violations > 0:
             st.write(
                 f"⚠️ {doc.name}: {w.rest_violations} rest violations, "
-                f"{w.consecutive_nights} consecutive nights, burnout {round(w.burnout_score,1)}"
+                f"{w.consecutive_nights} consecutive nights, "
+                f"burnout {round(w.burnout_score, 1)}"
             )
         else:
             st.write(f"✅ {doc.name}: No rest violations detected.")
