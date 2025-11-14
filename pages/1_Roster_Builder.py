@@ -10,74 +10,70 @@ from core.workload_analyzer import analyze_workload
 st.set_page_config(page_title="Roster Builder", layout="wide")
 st.title("📅 Roster Builder")
 
-# Ensure session keys exist
 for key in ["shifts", "roster"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
-# -----------------------------
+# ------------------------------------------------------------
 # 1. Generate Shifts
-# -----------------------------
+# ------------------------------------------------------------
 st.subheader("1. Generate Shifts")
 
-col1, col2 = st.columns(2)
-year = col1.number_input("Year", 2024, 2035, value=2025)
-month = col2.number_input("Month", 1, 12, value=1)
+c1, c2 = st.columns(2)
+year = c1.number_input("Year", 2024, 2035, value=2025)
+month = c2.number_input("Month", 1, 12, value=1)
 
 if st.button("Generate Shifts"):
-    output = "data/generated_shifts.csv"
-    generate_shifts_for_month(int(year), int(month), output)
+    csv_path = "data/generated_shifts.csv"
+    generate_shifts_for_month(int(year), int(month), csv_path)
 
-    # Load from DB so UI uses the same data as optimiser
     shifts = load_shifts()
     st.session_state["shifts"] = shifts
 
-    st.success(f"Generated & saved {len(shifts)} shifts.")
-    try:
-        st.write("Preview of CSV:")
-        st.dataframe(pd.read_csv(output).head(), width="stretch")
-    except Exception:
-        st.info("Could not read CSV preview, but shifts were saved to DB.")
+    st.success(f"Generated {len(shifts)} shifts")
 
-# -----------------------------
+    try:
+        st.dataframe(pd.read_csv(csv_path).head(), width="stretch")
+    except:
+        st.info("Shifts saved, but CSV preview unavailable.")
+
+
+# ------------------------------------------------------------
 # 2. Load Doctors
-# -----------------------------
+# ------------------------------------------------------------
 st.subheader("2. Load Doctors")
 
 doctors = get_all_doctors(active_only=True)
-
 if not doctors:
-    st.error("No doctors in DB. Please add them on the Doctor Manager page.")
+    st.error("No active doctors found. Add doctors first.")
 else:
     st.success(f"{len(doctors)} doctors loaded.")
-    df_docs = pd.DataFrame(
-        [
-            {
-                "ID": d.id,
-                "Name": d.name,
-                "Level": d.level,
-                "Firm": d.firm,
-                "Contract Hours": d.contract_hours_per_month,
-                "Min Shifts": d.min_shifts_per_month,
-                "Max Shifts": d.max_shifts_per_month,
-            }
-            for d in doctors
-        ]
-    )
-    st.dataframe(df_docs, width="stretch")
+    df_doctors = pd.DataFrame([
+        {
+            "ID": d.id,
+            "Name": d.name,
+            "Level": d.level,
+            "Firm": d.firm,
+            "Min Shifts": d.min_shifts_per_month,
+            "Max Shifts": d.max_shifts_per_month,
+        }
+        for d in doctors
+    ])
+    st.dataframe(df_doctors, width="stretch")
 
-# -----------------------------
-# 3. Choose Generation Mode
-# -----------------------------
+
+# ------------------------------------------------------------
+# 3. Choose Mode
+# ------------------------------------------------------------
 st.subheader("3. Generate Roster")
 
 mode = st.radio(
-    "Generation mode",
+    "Choose Mode",
     ["Naive assignment", "Optimised (PuLP)"],
-    index=0,
+    index=1,
 )
 
-shifts = st.session_state.get("shifts", None)
+shifts = st.session_state["shifts"]
 
 if shifts and doctors:
     if st.button("Generate Roster"):
@@ -90,82 +86,65 @@ if shifts and doctors:
                     doctors,
                     shifts,
                     leave_rows=leave_rows,
+                    rest_hours_required=11,   # UPDATED: was 18
                 )
 
             st.session_state["roster"] = roster
-            st.success(f"Roster generated using mode: {mode}")
+            st.success(f"Roster generated: {mode}")
 
         except Exception as e:
-            st.error(f"Error generating roster: {e}")
+            st.error(f"Optimizer error: {e}")
 else:
-    st.info("You need both shifts and doctors before generating a roster.")
+    st.info("Generate shifts and load doctors first.")
 
-# -----------------------------
+
+# ------------------------------------------------------------
 # 4. Display Assignments
-# -----------------------------
+# ------------------------------------------------------------
 if st.session_state["roster"]:
     roster = st.session_state["roster"]
 
     st.subheader("4. Roster Assignments")
 
-    df_assign = pd.DataFrame(
-        [
-            {"Doctor ID": a.doctor_id, "Shift ID": a.shift_id}
-            for a in roster.assignments
-        ]
+    df_assign = pd.DataFrame([
+        {"Doctor": a.doctor_id, "Shift": a.shift_id}
+        for a in roster.assignments
+    ])
+
+    st.dataframe(df_assign, width="stretch")
+
+    st.download_button(
+        "⬇ Download CSV",
+        df_assign.to_csv(index=False).encode("utf-8"),
+        "roster_output.csv",
+        "text/csv",
     )
 
-    if df_assign.empty:
-        st.warning("No assignments in roster (possibly no feasible solution).")
-    else:
-        st.dataframe(df_assign, width="stretch")
-        st.download_button(
-            "⬇ Download Roster CSV",
-            df_assign.to_csv(index=False).encode("utf-8"),
-            file_name="roster_output.csv",
-            mime="text/csv",
-        )
+    # --------------------------------------------------------
+    # 5. Workload / Burnout Summary
+    # --------------------------------------------------------
+    st.subheader("5. Workload & Burnout Summary")
 
-    # -----------------------------
-    # 5. Workload + Burnout Summary
-    # -----------------------------
-    st.subheader("5. Doctor Workload & Burnout Summary")
-
-    workload = analyze_workload(roster.doctors, roster.shifts, roster.assignments)
+    workload = analyze_workload(
+        roster.doctors,
+        roster.shifts,
+        roster.assignments,
+    )
 
     rows = []
     for doc in roster.doctors:
         w = workload[doc.id]
-        rows.append(
-            {
-                "Doctor": doc.name,
-                "Shifts": w.total_shifts,
-                "Hours": round(w.total_hours, 1),
-                "Night Shifts": w.night_shifts,
-                "Weekend Shifts": w.weekend_shifts,
-                "Consec Days": w.consecutive_days,
-                "Consec Nights": w.consecutive_nights,
-                "Rest Violations": w.rest_violations,
-                "Burnout Score": round(w.burnout_score, 1),
-            }
-        )
+        rows.append({
+            "Doctor": doc.name,
+            "Shifts": w.total_shifts,
+            "Hours": round(w.total_hours, 1),
+            "Night shifts": w.night_shifts,
+            "Weekend shifts": w.weekend_shifts,
+            "Consec Days": w.consecutive_days,
+            "Consec Nights": w.consecutive_nights,
+            "Rest Violations": w.rest_violations,
+            "Burnout Score": round(w.burnout_score, 1),
+        })
 
     df_work = pd.DataFrame(rows)
     st.dataframe(df_work, width="stretch")
-
-    # -----------------------------
-    # 6. Simple Rest Violation Warnings
-    # -----------------------------
-    st.subheader("6. Warnings & Rest Violations")
-
-    for doc in roster.doctors:
-        w = workload[doc.id]
-        if w.rest_violations > 0:
-            st.write(
-                f"⚠️ {doc.name}: {w.rest_violations} rest violations, "
-                f"{w.consecutive_nights} consecutive nights, "
-                f"burnout {round(w.burnout_score, 1)}"
-            )
-        else:
-            st.write(f"✅ {doc.name}: No rest violations detected.")
-
