@@ -1,98 +1,69 @@
 # core/database.py
 
+import os
 import sqlite3
-from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from core.models import Doctor, Shift
 
+DB_PATH = os.path.join("data", "roster.db")
 
-DB_PATH = Path("data/ed_roster.db")
 
-
-# ==========================================================
-# CONNECTION & INITIALIZATION
-# ==========================================================
-
-def get_connection() -> sqlite3.Connection:
-    """Ensure DB folder exists and return a connection."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def get_connection():
+    os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    """Creates tables if they do not exist."""
     conn = get_connection()
     cur = conn.cursor()
 
-    # ------------------------- Doctors -------------------------
+    # Doctors table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doctors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            external_id TEXT UNIQUE,
+            id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             level TEXT NOT NULL,
             firm INTEGER,
             contract_hours INTEGER NOT NULL,
             min_shifts INTEGER NOT NULL,
             max_shifts INTEGER NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            active INTEGER NOT NULL DEFAULT 1
         )
         """
     )
 
-    # ------------------------- Shifts -------------------------
+    # Shifts table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            start TEXT NOT NULL,
-            end TEXT NOT NULL,
-            is_weekend INTEGER NOT NULL,
-            is_night INTEGER NOT NULL,
-            intensity INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            duration_hours REAL NOT NULL,
             min_doctors INTEGER NOT NULL,
             max_doctors INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            is_weekend INTEGER NOT NULL
         )
         """
     )
 
-    # ------------------------- Leave -------------------------
+    # Leave requests table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS leave_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doctor_external_id TEXT NOT NULL,
-            leave_type TEXT NOT NULL,        -- "annual" or "sick"
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
+            leave_type TEXT NOT NULL,
             reason TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
-        )
-        """
-    )
-
-    # ------------------------- Preferences -------------------------
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS doctor_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doctor_external_id TEXT NOT NULL,
-            preference_type TEXT NOT NULL,   -- e.g. "avoid_nights", "prefer_early", "unavailable"
-            start_date TEXT,
-            end_date TEXT,
-            notes TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (doctor_external_id) REFERENCES doctors(external_id)
+            FOREIGN KEY (doctor_external_id) REFERENCES doctors(id)
         )
         """
     )
@@ -101,144 +72,152 @@ def init_db():
     conn.close()
 
 
-# ==========================================================
-# DOCTOR HELPERS
-# ==========================================================
+# -------------------------------------------------------
+# DOCTORS
+# -------------------------------------------------------
 
-def _row_to_doctor(row: sqlite3.Row) -> Doctor:
-    return Doctor(
-        id=row["external_id"],
-        name=row["name"],
-        level=row["level"],
-        firm=row["firm"],
-        contract_hours_per_month=row["contract_hours"],
-        min_shifts_per_month=row["min_shifts"],
-        max_shifts_per_month=row["max_shifts"],
-    )
+def _generate_doctor_id(name: str) -> str:
+    # Simple deterministic ID from name + timestamp
+    return f"DOC_{name[:3].upper()}_{int(datetime.now().timestamp())}"
 
 
-def create_doctor(name, level, firm, contract_hours, min_shifts, max_shifts) -> Doctor:
-    """Create a doctor and return the object."""
+def create_doctor(
+    name: str,
+    level: str,
+    firm: Optional[int],
+    contract_hours: int,
+    min_shifts: int,
+    max_shifts: int,
+) -> Doctor:
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
 
-    # Insert placeholder external_id first
+    doc_id = _generate_doctor_id(name)
+
     cur.execute(
         """
-        INSERT INTO doctors 
-        (external_id, name, level, firm, contract_hours, min_shifts, max_shifts,
-         active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        INSERT INTO doctors (id, name, level, firm, contract_hours, min_shifts, max_shifts, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
         """,
-        ("", name, level, firm, contract_hours, min_shifts, max_shifts, now, now),
+        (doc_id, name, level, firm, contract_hours, min_shifts, max_shifts),
     )
-
-    new_id = cur.lastrowid
-    external_id = f"D{new_id:02d}"
-
-    # Set correct external_id
-    cur.execute(
-        "UPDATE doctors SET external_id=?, updated_at=? WHERE id=?",
-        (external_id, now, new_id),
-    )
-
     conn.commit()
     conn.close()
 
     return Doctor(
-        id=external_id,
+        id=doc_id,
         name=name,
         level=level,
         firm=firm,
         contract_hours_per_month=contract_hours,
         min_shifts_per_month=min_shifts,
         max_shifts_per_month=max_shifts,
+        active=True,
     )
 
 
 def get_all_doctors(active_only: bool = True) -> List[Doctor]:
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
 
     if active_only:
-        cur.execute("SELECT * FROM doctors WHERE active=1 ORDER BY id")
+        cur.execute("SELECT * FROM doctors WHERE active = 1 ORDER BY name")
     else:
-        cur.execute("SELECT * FROM doctors ORDER BY id")
+        cur.execute("SELECT * FROM doctors ORDER BY name")
 
     rows = cur.fetchall()
     conn.close()
-    return [_row_to_doctor(r) for r in rows]
+
+    docs: List[Doctor] = []
+    for r in rows:
+        docs.append(
+            Doctor(
+                id=r["id"],
+                name=r["name"],
+                level=r["level"],
+                firm=r["firm"],
+                contract_hours_per_month=r["contract_hours"],
+                min_shifts_per_month=r["min_shifts"],
+                max_shifts_per_month=r["max_shifts"],
+                active=bool(r["active"]),
+            )
+        )
+    return docs
 
 
-def update_doctor_hours_and_shifts(external_id, contract_hours, min_shifts, max_shifts):
+def update_doctor_hours_and_shifts(
+    external_id: str,
+    contract_hours: int,
+    min_shifts: int,
+    max_shifts: int,
+):
     conn = get_connection()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
 
     cur.execute(
         """
         UPDATE doctors
-        SET contract_hours=?, min_shifts=?, max_shifts=?, updated_at=?
-        WHERE external_id=?
+        SET contract_hours = ?, min_shifts = ?, max_shifts = ?
+        WHERE id = ?
         """,
-        (contract_hours, min_shifts, max_shifts, now, external_id),
+        (contract_hours, min_shifts, max_shifts, external_id),
     )
-
     conn.commit()
     conn.close()
 
 
-def deactivate_doctor(external_id):
+def deactivate_doctor(external_id: str):
     conn = get_connection()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
-
     cur.execute(
-        "UPDATE doctors SET active=0, updated_at=? WHERE external_id=?",
-        (now, external_id),
+        "UPDATE doctors SET active = 0 WHERE id = ?",
+        (external_id,),
     )
-
     conn.commit()
     conn.close()
 
 
-# ==========================================================
-# SHIFT HELPERS
-# ==========================================================
+# -------------------------------------------------------
+# SHIFTS
+# -------------------------------------------------------
 
-def delete_all_shifts():
+def save_generated_shifts(shift_rows):
+    """
+    shift_rows: list of dicts with keys:
+        date, start_time, end_time, duration_hours,
+        min_doctors, max_doctors, is_weekend
+    """
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
+
+    # wipe existing shifts for now (one month at a time)
     cur.execute("DELETE FROM shifts")
-    conn.commit()
-    conn.close()
 
-
-def save_shifts(shifts: List[Shift]):
-    conn = get_connection()
-    cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
-
-    for s in shifts:
+    for s in shift_rows:
         cur.execute(
             """
-            INSERT OR REPLACE INTO shifts
-            (id, name, start, end, is_weekend, is_night,
-             intensity, min_doctors, max_doctors, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO shifts (
+                date,
+                start_time,
+                end_time,
+                duration_hours,
+                min_doctors,
+                max_doctors,
+                is_weekend
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                s.id,
-                s.name,
-                s.start.isoformat(),
-                s.end.isoformat(),
-                1 if s.is_weekend else 0,
-                1 if s.is_night else 0,
-                s.intensity,
-                s.min_doctors,
-                s.max_doctors,
-                now,
+                s["date"],
+                s["start_time"],
+                s["end_time"],
+                s["duration_hours"],
+                s["min_doctors"],
+                s["max_doctors"],
+                s["is_weekend"],
             ),
         )
 
@@ -247,48 +226,65 @@ def save_shifts(shifts: List[Shift]):
 
 
 def load_shifts() -> List[Shift]:
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM shifts ORDER BY start")
+    cur.execute("SELECT * FROM shifts ORDER BY date, start_time")
     rows = cur.fetchall()
     conn.close()
-    return [Shift.from_dict(dict(r)) for r in rows]
+
+    shifts: List[Shift] = []
+    for r in rows:
+        start_dt = datetime.fromisoformat(r["start_time"])
+        end_dt = datetime.fromisoformat(r["end_time"])
+        shifts.append(
+            Shift(
+                id=r["id"],
+                start=start_dt,
+                end=end_dt,
+                duration_hours=r["duration_hours"],
+                min_doctors=r["min_doctors"],
+                max_doctors=r["max_doctors"],
+                is_weekend=bool(r["is_weekend"]),
+            )
+        )
+    return shifts
 
 
-# ==========================================================
-# LEAVE HELPERS
-# ==========================================================
+# -------------------------------------------------------
+# LEAVE
+# -------------------------------------------------------
 
-def create_leave_request(doctor_id, leave_type, start_date, end_date, reason=""):
+def create_leave(
+    doctor_external_id: str,
+    start_date: datetime,
+    end_date: datetime,
+    leave_type: str,
+    reason: str = "",
+):
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute(
         """
         INSERT INTO leave_requests
-        (doctor_external_id, leave_type, start_date, end_date, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        (doctor_external_id, start_date, end_date, leave_type, reason)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (doctor_id, leave_type, start_date, end_date, reason),
+        (
+            doctor_external_id,
+            start_date.date().isoformat(),
+            end_date.date().isoformat(),
+            leave_type,
+            reason,
+        ),
     )
-
     conn.commit()
     conn.close()
 
 
-def get_leave_for_doctor(doctor_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM leave_requests WHERE doctor_external_id=? ORDER BY start_date",
-        (doctor_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
 def get_all_leave():
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT * FROM leave_requests ORDER BY start_date")
@@ -297,65 +293,10 @@ def get_all_leave():
     return rows
 
 
-def delete_leave(leave_id):
+def delete_leave(leave_id: int):
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM leave_requests WHERE id=?", (leave_id,))
+    cur.execute("DELETE FROM leave_requests WHERE id = ?", (leave_id,))
     conn.commit()
     conn.close()
-
-
-# ==========================================================
-# PREFERENCES HELPERS
-# ==========================================================
-
-def create_preference(doctor_id, preference_type, start_date, end_date, notes=""):
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        INSERT INTO doctor_preferences
-        (doctor_external_id, preference_type, start_date, end_date, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
-        """,
-        (doctor_id, preference_type, start_date, end_date, notes),
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_preferences_for_doctor(doctor_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM doctor_preferences
-        WHERE doctor_external_id=?
-        ORDER BY start_date
-        """,
-        (doctor_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def get_all_preferences():
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM doctor_preferences ORDER BY start_date")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def delete_preference(pref_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM doctor_preferences WHERE id=?", (pref_id,))
-    conn.commit()
-    conn.close()
-
-
