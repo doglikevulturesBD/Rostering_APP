@@ -10,6 +10,10 @@ from core.models import Doctor, Shift
 DB_PATH = os.path.join("data", "roster.db")
 
 
+# -------------------------------------------------------
+#  CONNECTION + INITIALISATION
+# -------------------------------------------------------
+
 def get_connection():
     os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -21,7 +25,9 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Doctors table
+    # -----------------------------
+    # DOCTORS
+    # -----------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doctors (
@@ -29,15 +35,17 @@ def init_db():
             name TEXT NOT NULL,
             level TEXT NOT NULL,
             firm INTEGER,
-            contract_hours INTEGER NOT NULL,
-            min_shifts INTEGER NOT NULL,
-            max_shifts INTEGER NOT NULL,
+            contract_hours_per_month INTEGER NOT NULL,
+            min_shifts_per_month INTEGER NOT NULL,
+            max_shifts_per_month INTEGER NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
         )
         """
     )
 
-    # Shifts table
+    # -----------------------------
+    # SHIFTS
+    # -----------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
@@ -53,17 +61,34 @@ def init_db():
         """
     )
 
-    # Leave requests table
+    # -----------------------------
+    # LEAVE
+    # -----------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS leave_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doctor_external_id TEXT NOT NULL,
+            doctor_id TEXT NOT NULL,
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
             leave_type TEXT NOT NULL,
             reason TEXT,
-            FOREIGN KEY (doctor_external_id) REFERENCES doctors(id)
+            FOREIGN KEY (doctor_id) REFERENCES doctors(id)
+        )
+        """
+    )
+
+    # -----------------------------
+    # ASSIGNMENTS
+    # -----------------------------
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_id TEXT NOT NULL,
+            shift_id INTEGER NOT NULL,
+            FOREIGN KEY (doctor_id) REFERENCES doctors(id),
+            FOREIGN KEY (shift_id) REFERENCES shifts(id)
         )
         """
     )
@@ -77,7 +102,6 @@ def init_db():
 # -------------------------------------------------------
 
 def _generate_doctor_id(name: str) -> str:
-    # Simple deterministic ID from name + timestamp
     return f"DOC_{name[:3].upper()}_{int(datetime.now().timestamp())}"
 
 
@@ -93,27 +117,33 @@ def create_doctor(
     conn = get_connection()
     cur = conn.cursor()
 
-    doc_id = _generate_doctor_id(name)
+    doctor_id = _generate_doctor_id(name)
 
     cur.execute(
         """
-        INSERT INTO doctors (id, name, level, firm, contract_hours, min_shifts, max_shifts, active)
+        INSERT INTO doctors (id, name, level, firm,
+                             contract_hours_per_month,
+                             min_shifts_per_month,
+                             max_shifts_per_month,
+                             active)
         VALUES (?, ?, ?, ?, ?, ?, ?, 1)
         """,
-        (doc_id, name, level, firm, contract_hours, min_shifts, max_shifts),
+        (doctor_id, name, level, firm,
+         contract_hours, min_shifts, max_shifts)
     )
+
     conn.commit()
     conn.close()
 
     return Doctor(
-        id=doc_id,
+        id=doctor_id,
         name=name,
         level=level,
         firm=firm,
         contract_hours_per_month=contract_hours,
         min_shifts_per_month=min_shifts,
         max_shifts_per_month=max_shifts,
-        active=True,
+        active=True
     )
 
 
@@ -130,21 +160,21 @@ def get_all_doctors(active_only: bool = True) -> List[Doctor]:
     rows = cur.fetchall()
     conn.close()
 
-    docs: List[Doctor] = []
+    result = []
     for r in rows:
-        docs.append(
+        result.append(
             Doctor(
                 id=r["id"],
                 name=r["name"],
                 level=r["level"],
                 firm=r["firm"],
-                contract_hours_per_month=r["contract_hours"],
-                min_shifts_per_month=r["min_shifts"],
-                max_shifts_per_month=r["max_shifts"],
-                active=bool(r["active"]),
+                contract_hours_per_month=r["contract_hours_per_month"],
+                min_shifts_per_month=r["min_shifts_per_month"],
+                max_shifts_per_month=r["max_shifts_per_month"],
+                active=bool(r["active"])
             )
         )
-    return docs
+    return result
 
 
 def update_doctor_hours_and_shifts(
@@ -159,11 +189,14 @@ def update_doctor_hours_and_shifts(
     cur.execute(
         """
         UPDATE doctors
-        SET contract_hours = ?, min_shifts = ?, max_shifts = ?
+        SET contract_hours_per_month = ?,
+            min_shifts_per_month = ?,
+            max_shifts_per_month = ?
         WHERE id = ?
         """,
-        (contract_hours, min_shifts, max_shifts, external_id),
+        (contract_hours, min_shifts, max_shifts, external_id)
     )
+
     conn.commit()
     conn.close()
 
@@ -185,28 +218,23 @@ def deactivate_doctor(external_id: str):
 
 def save_generated_shifts(shift_rows):
     """
-    shift_rows: list of dicts with keys:
-        date, start_time, end_time, duration_hours,
-        min_doctors, max_doctors, is_weekend
+    Accepts list of dicts:
+      date, start_time, end_time, duration_hours,
+      min_doctors, max_doctors, is_weekend
     """
     init_db()
     conn = get_connection()
     cur = conn.cursor()
 
-    # wipe existing shifts for now (one month at a time)
     cur.execute("DELETE FROM shifts")
 
     for s in shift_rows:
         cur.execute(
             """
             INSERT INTO shifts (
-                date,
-                start_time,
-                end_time,
-                duration_hours,
-                min_doctors,
-                max_doctors,
-                is_weekend
+                date, start_time, end_time,
+                duration_hours, min_doctors,
+                max_doctors, is_weekend
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -229,23 +257,22 @@ def load_shifts() -> List[Shift]:
     init_db()
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("SELECT * FROM shifts ORDER BY date, start_time")
     rows = cur.fetchall()
     conn.close()
 
-    shifts: List[Shift] = []
+    shifts = []
     for r in rows:
-        start_dt = datetime.fromisoformat(r["start_time"])
-        end_dt = datetime.fromisoformat(r["end_time"])
         shifts.append(
             Shift(
                 id=r["id"],
-                start=start_dt,
-                end=end_dt,
+                start=datetime.fromisoformat(r["start_time"]),
+                end=datetime.fromisoformat(r["end_time"]),
                 duration_hours=r["duration_hours"],
                 min_doctors=r["min_doctors"],
                 max_doctors=r["max_doctors"],
-                is_weekend=bool(r["is_weekend"]),
+                is_weekend=bool(r["is_weekend"])
             )
         )
     return shifts
@@ -256,7 +283,7 @@ def load_shifts() -> List[Shift]:
 # -------------------------------------------------------
 
 def create_leave(
-    doctor_external_id: str,
+    doctor_id: str,
     start_date: datetime,
     end_date: datetime,
     leave_type: str,
@@ -265,20 +292,20 @@ def create_leave(
     init_db()
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute(
         """
         INSERT INTO leave_requests
-        (doctor_external_id, start_date, end_date, leave_type, reason)
+        (doctor_id, start_date, end_date, leave_type, reason)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (
-            doctor_external_id,
-            start_date.date().isoformat(),
-            end_date.date().isoformat(),
-            leave_type,
-            reason,
-        ),
+        (doctor_id,
+         start_date.date().isoformat(),
+         end_date.date().isoformat(),
+         leave_type,
+         reason)
     )
+
     conn.commit()
     conn.close()
 
@@ -301,99 +328,45 @@ def delete_leave(leave_id: int):
     conn.commit()
     conn.close()
 
-# -------------------------------
-#   LOAD SHIFTS FROM DATABASE
-# -------------------------------
-def load_shifts():
+
+# -------------------------------------------------------
+# ASSIGNMENTS
+# -------------------------------------------------------
+
+def save_assignments(assignments):
+    """
+    assignments: list of dicts:
+      { "doctor_id": ..., "shift_id": ... }
+    """
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT external_id, date, start_time, end_time, is_weekend
-        FROM shifts
-        ORDER BY date, start_time
-    """)
+    cur.execute("DELETE FROM assignments")
 
-    rows = cur.fetchall()
+    for a in assignments:
+        cur.execute(
+            """
+            INSERT INTO assignments (doctor_id, shift_id)
+            VALUES (?, ?)
+            """,
+            (a["doctor_id"], a["shift_id"])
+        )
+
+    conn.commit()
     conn.close()
 
-    return [
-        {
-            "external_id": r[0],
-            "date": r[1],
-            "start_time": r[2],
-            "end_time": r[3],
-            "is_weekend": r[4]
-        }
-        for r in rows
-    ]
 
-
-# -------------------------------
-#   LOAD ASSIGNMENTS (Doctor → Shift)
-# -------------------------------
 def load_assignments():
+    init_db()
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT doctor_external_id, shift_external_id
-        FROM assignments
-        ORDER BY shift_external_id
-    """)
-
+    cur.execute("SELECT * FROM assignments ORDER BY shift_id")
     rows = cur.fetchall()
     conn.close()
 
     return [
-        {
-            "doctor": r[0],
-            "shift": r[1]
-        }
+        {"doctor_id": r["doctor_id"], "shift_id": r["shift_id"]}
         for r in rows
     ]
-
-
-# -------------------------------
-#   GET ALL DOCTORS (safe version)
-# -------------------------------
-def get_all_doctors(active_only=True):
-    conn = get_connection()
-    cur = conn.cursor()
-
-    if active_only:
-        cur.execute("""
-            SELECT external_id, name, level, firm,
-                   contract_hours_per_month, 
-                   min_shifts_per_month, 
-                   max_shifts_per_month
-            FROM doctors
-            WHERE active = 1
-            ORDER BY name
-        """)
-    else:
-        cur.execute("""
-            SELECT external_id, name, level, firm,
-                   contract_hours_per_month, 
-                   min_shifts_per_month, 
-                   max_shifts_per_month
-            FROM doctors
-            ORDER BY name
-        """)
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [
-        {
-            "external_id": r[0],
-            "name": r[1],
-            "level": r[2],
-            "firm": r[3],
-            "contract_hours": r[4],
-            "min_shifts": r[5],
-            "max_shifts": r[6]
-        }
-        for r in rows
-    ]
-
