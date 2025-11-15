@@ -32,7 +32,7 @@ if st.button("🛠 Generate Shifts for This Month", type="primary"):
     try:
         generate_shifts_for_month(int(year), int(month))
         st.success("Shifts successfully generated and saved to the database.")
-        st.experimental_rerun()
+        st.rerun()
     except Exception as e:
         st.error(f"Error generating shifts: {e}")
 
