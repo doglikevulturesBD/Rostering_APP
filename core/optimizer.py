@@ -1,392 +1,197 @@
+# core/optimizer.py
+
+import itertools
+from datetime import datetime, timedelta
 import pulp
-from datetime import timedelta
-from collections import defaultdict
+from core.models import AssignmentResult, Assignment
 
-from core.models import Assignment, AssignmentResult, Shift, Doctor
-from core.database import get_all_leave
+# -------------------------------------------------------
+# Helper functions
+# -------------------------------------------------------
 
-REST_HOURS = 11  # minimum rest period between shifts
-
-
-# ----------------- helpers ----------------- #
-
-def shifts_overlap(start1, end1, start2, end2) -> bool:
-    """Returns True if two shifts overlap in time."""
-    return not (end1 <= start2 or end2 <= start1)
+def is_night_shift(shift):
+    """Night shift = start at or after 21:00."""
+    return shift.start.hour >= 21
 
 
-def is_night_shift(shift: Shift) -> bool:
+def is_weeknight(shift):
+    """True if night AND Monday–Thursday."""
+    return is_night_shift(shift) and shift.start.weekday() < 4
+
+
+def is_weekend(shift):
+    return shift.start.weekday() >= 5
+
+
+def same_day(s1, s2):
+    return s1.start.date() == s2.start.date()
+
+
+def shift_gap_hours(s1, s2):
+    """Positive hours between shifts if s2 follows s1."""
+    return (s2.start - s1.end).total_seconds() / 3600.0
+
+
+# -------------------------------------------------------
+# Main Optimizer
+# -------------------------------------------------------
+
+def build_and_solve_roster(shifts, doctors):
     """
-    Night = starts at or after 21:00 OR ends at/before 07:00 (crossing midnight).
-    Adjust if your templates change.
-    """
-    sh = shift.start.hour
-    eh = shift.end.hour
-    return sh >= 21 or eh <= 7
-
-
-# ----------------- main solver ----------------- #
-
-def build_and_solve_roster(
-    doctors: list[Doctor],
-    shifts: list[Shift],
-) -> AssignmentResult | None:
-    """
-    Optimiser (PuLP-based) with hard clinical rules and fairness:
-
-    Hard constraints:
-      1. Min & max doctors per shift
-      2. No overlapping shifts per doctor
-      3. At least REST_HOURS between any two shifts for a doctor
-      4. Per-doctor monthly min & max shifts from doctor profile
-      5. Respect leave (no shifts during leave periods)
-      6. Each doctor works between 1 and 3 weekends per month
-         (weekend = any Sat/Sun shift; nights handled separately)
-      7. If a doctor works Friday night, they must also work Sat & Sun night (same weekend)
-      8. Max 2 weekday night shifts (Mon–Thu) per ISO week
-      9. Max 3 nights in a row (no 4 consecutive nights)
-
-    Objective:
-      - Minimise spread between most- and least-worked doctors (total shifts)
-      - Also minimise spread between most- and least-worked doctors (night shifts)
-
-    Returns:
-      AssignmentResult(assignments=[Assignment(...), ...])
-      or None if infeasible.
+    shifts  = list[Shift]
+    doctors = list[Doctor]
     """
 
-    if not doctors or not shifts:
-        return None
+    model = pulp.LpProblem("Doctor_Rostering", pulp.LpMinimize)
 
-    doctor_ids = [d.id for d in doctors]
-    shift_ids = [s.id for s in shifts]
-
-    doctor_by_id = {d.id: d for d in doctors}
-
-    # --------------------------------------------------------
-    # PRE-COMPUTE STRUCTURES FOR WEEKENDS & NIGHTS
-    # --------------------------------------------------------
-
-    # Map: (iso_year, iso_week) -> list of *all* weekend shift IDs (Sat/Sun, any type)
-    weekends: dict[tuple[int, int], list[int]] = defaultdict(list)
-
-    # Map: (iso_year, iso_week) -> dict{'fri','sat','sun'} -> night shift id or None
-    weekend_nights: dict[tuple[int, int], dict[str, int | None]] = {}
-
-    # Map: (iso_year, iso_week) -> list of night shift IDs that are weekday nights (Mon–Thu)
-    weekday_nights_per_week: dict[tuple[int, int], list[int]] = defaultdict(list)
-
-    # For consecutive nights: map date -> night shift id
-    night_shift_by_date: dict = {}
-
-    night_shift_ids: list[int] = []
-
-    for s in shifts:
-        dt = s.start
-        iso_year, iso_week, _ = dt.isocalendar()
-        dow = dt.weekday()  # Mon=0 ... Sun=6
-
-        # Weekend shifts: Sat (5), Sun (6) – ANY shift counts for weekend load
-        if dow in (5, 6):
-            weekends[(iso_year, iso_week)].append(s.id)
-
-        # Night shift logic
-        if is_night_shift(s):
-            night_shift_ids.append(s.id)
-            date_key = s.start.date()
-            night_shift_by_date[date_key] = s.id
-
-            # Weekend nights - for F/S/S block rule
-            if dow in (4, 5, 6):  # Fri=4, Sat=5, Sun=6
-                wn = weekend_nights.setdefault(
-                    (iso_year, iso_week),
-                    {"fri": None, "sat": None, "sun": None},
-                )
-                if dow == 4:
-                    wn["fri"] = s.id
-                elif dow == 5:
-                    wn["sat"] = s.id
-                else:
-                    wn["sun"] = s.id
-
-            # Weekday nights (Mon–Thu) per week for limit=2
-            if dow in (0, 1, 2, 3):
-                weekday_nights_per_week[(iso_year, iso_week)].append(s.id)
-
-    # --------------------------------------------------------
-    # CREATE MODEL
-    # --------------------------------------------------------
-    model = pulp.LpProblem("Doctor_Roster", pulp.LpMinimize)
-
-    # x[d, s] = 1 if doctor d works shift s
-    x = pulp.LpVariable.dicts(
+    # DECISION VARIABLES
+    X = pulp.LpVariable.dicts(
         "assign",
-        ((d_id, s_id) for d_id in doctor_ids for s_id in shift_ids),
-        cat=pulp.LpBinary,
+        ((d.id, s.id) for d in doctors for s in shifts),
+        lowBound=0,
+        upBound=1,
+        cat="Binary",
     )
 
-    # --------------------------------------------------------
-    # 1) MIN & MAX DOCTORS PER SHIFT
-    # --------------------------------------------------------
+    # ---------------------------------------------------
+    # 1. COVERAGE CONSTRAINTS
+    # ---------------------------------------------------
     for s in shifts:
         model += (
-            pulp.lpSum(x[(d_id, s.id)] for d_id in doctor_ids)
+            pulp.lpSum(X[(d.id, s.id)] for d in doctors)
             >= s.min_doctors,
-            f"MinDoctors_Shift_{s.id}",
+            f"min_coverage_s{s.id}",
         )
         model += (
-            pulp.lpSum(x[(d_id, s.id)] for d_id in doctor_ids)
+            pulp.lpSum(X[(d.id, s.id)] for d in doctors)
             <= s.max_doctors,
-            f"MaxDoctors_Shift_{s.id}",
+            f"max_coverage_s{s.id}",
         )
 
-    # --------------------------------------------------------
-    # 2) NO OVERLAPPING SHIFTS + 3) REST PERIOD >= REST_HOURS
-    # --------------------------------------------------------
-    rest_delta = timedelta(hours=REST_HOURS)
-
-    for d_id in doctor_ids:
-        for i, s1 in enumerate(shifts):
-            for j, s2 in enumerate(shifts):
-                if j <= i:
-                    continue
-
-                overlap = shifts_overlap(s1.start, s1.end, s2.start, s2.end)
-
-                rest_violation_forward = (
-                    s2.start < s1.end + rest_delta and s2.start >= s1.start
-                )
-                rest_violation_backward = (
-                    s1.start < s2.end + rest_delta and s1.start >= s2.start
-                )
-
-                if overlap or rest_violation_forward or rest_violation_backward:
-                    model += (
-                        x[(d_id, s1.id)] + x[(d_id, s2.id)] <= 1,
-                        f"NoOverlapOrRest_{d_id}_{s1.id}_{s2.id}",
-                    )
-
-    # --------------------------------------------------------
-    # 4) PER-DOCTOR MIN & MAX SHIFTS (MONTH)
-    # --------------------------------------------------------
-    total_shifts_expr = {}
+    # ---------------------------------------------------
+    # 2. DOCTOR CANNOT WORK TWO SHIFTS IN ONE DAY
+    # ---------------------------------------------------
     for d in doctors:
-        total_shifts_for_d = pulp.lpSum(x[(d.id, s.id)] for s in shifts)
-        total_shifts_expr[d.id] = total_shifts_for_d
-
-        if d.min_shifts_per_month > 0:
+        for day, group in itertools.groupby(
+            sorted(shifts, key=lambda s: s.start.date()),
+            key=lambda s: s.start.date(),
+        ):
+            group = list(group)
             model += (
-                total_shifts_for_d >= d.min_shifts_per_month,
-                f"MinShifts_Doctor_{d.id}",
-            )
-        if d.max_shifts_per_month > 0:
-            model += (
-                total_shifts_for_d <= d.max_shifts_per_month,
-                f"MaxShifts_Doctor_{d.id}",
+                pulp.lpSum(X[(d.id, s.id)] for s in group) <= 1,
+                f"one_shift_per_day_{d.id}_{day}",
             )
 
-    # --------------------------------------------------------
-    # 5) LEAVE CONSTRAINTS
-    # --------------------------------------------------------
-    leave_rows = get_all_leave()
-    leave_map: dict[str, list[tuple[str, str]]] = {}
-    for row in leave_rows:
-        doc_id = row["doctor_external_id"]
-        if doc_id not in doctor_by_id:
-            continue
-        leave_map.setdefault(doc_id, []).append(
-            (row["start_date"], row["end_date"])
-        )
-
-    for d_id, intervals in leave_map.items():
-        for s in shifts:
-            shift_date_str = s.start.date().isoformat()
-            for (start_str, end_str) in intervals:
-                if start_str <= shift_date_str <= end_str:
+    # ---------------------------------------------------
+    # 3. REST PERIOD ≥ 11 HOURS
+    # ---------------------------------------------------
+    for d in doctors:
+        for s1, s2 in itertools.permutations(shifts, 2):
+            if s2.start > s1.start:
+                gap = shift_gap_hours(s1, s2)
+                if gap < 11:
                     model += (
-                        x[(d_id, s.id)] == 0,
-                        f"Leave_{d_id}_{s.id}_{start_str}_{end_str}",
+                        X[(d.id, s1.id)] + X[(d.id, s2.id)] <= 1,
+                        f"rest_gap_{d.id}_{s1.id}_{s2.id}",
                     )
-                    break
 
-    # --------------------------------------------------------
-    # 6) WEEKEND LOAD: 1–3 WEEKENDS PER DOCTOR
-    #    Weekend = any Sat/Sun shift; 2 is "ideal" (enforced later via fairness)
-    # --------------------------------------------------------
-    weekend_var: dict[tuple[str, tuple[int, int]], pulp.LpVariable] = {}
+    # ---------------------------------------------------
+    # 4. NO MORE THAN 3 CONSECUTIVE NIGHT SHIFTS
+    # ---------------------------------------------------
+    night_shifts = [s for s in shifts if is_night_shift(s)]
+    night_shifts_sorted = sorted(night_shifts, key=lambda s: s.start)
 
-    for d_id in doctor_ids:
-        for w_key, shift_list in weekends.items():
-            if not shift_list:
-                continue
-            var = pulp.LpVariable(
-                f"wk_{d_id}_{w_key[0]}_{w_key[1]}",
-                cat=pulp.LpBinary,
-            )
-            weekend_var[(d_id, w_key)] = var
-
-            # If weekend_var = 1 => at least one shift that weekend
+    for d in doctors:
+        for i in range(len(night_shifts_sorted) - 3):
+            block = night_shifts_sorted[i : i + 4]
             model += (
-                pulp.lpSum(x[(d_id, sid)] for sid in shift_list) >= var,
-                f"WeekendLower_{d_id}_{w_key}",
-            )
-            # If no shifts => weekend_var must be 0
-            model += (
-                pulp.lpSum(x[(d_id, sid)] for sid in shift_list)
-                <= len(shift_list) * var,
-                f"WeekendUpper_{d_id}_{w_key}",
+                pulp.lpSum(X[(d.id, s.id)] for s in block) <= 3,
+                f"max_3_nights_row_{d.id}_{i}",
             )
 
-    all_weekend_keys = list(weekends.keys())
-
-    if all_weekend_keys:
-        for d_id in doctor_ids:
-            # Sum of weekends this doctor works
-            wk_sum = pulp.lpSum(
-                weekend_var.get((d_id, w_key), 0)
-                for w_key in all_weekend_keys
-            )
-            # Hard bounds: at least 1, at most 3
-            model += (
-                wk_sum >= 1,
-                f"Min1Weekend_{d_id}",
-            )
-            model += (
-                wk_sum <= 3,
-                f"Max3Weekends_{d_id}",
-            )
-
-    # --------------------------------------------------------
-    # 7) FRIDAY–SATURDAY–SUNDAY NIGHT BLOCKS (for nights only)
-    # --------------------------------------------------------
-    # If doctor works Friday night => must also work Sat & Sun night of same weekend
-    for (iso_year, iso_week), nights_dict in weekend_nights.items():
-        fri_id = nights_dict.get("fri")
-        sat_id = nights_dict.get("sat")
-        sun_id = nights_dict.get("sun")
-
-        if fri_id is None or sat_id is None or sun_id is None:
-            continue  # skip incomplete weekend nights
-
-        for d_id in doctor_ids:
-            # If they do Fri night, they must also be on Sat & Sun night
-            model += (
-                x[(d_id, fri_id)] <= x[(d_id, sat_id)],
-                f"FriImpliesSat_{d_id}_{iso_year}_{iso_week}",
-            )
-            model += (
-                x[(d_id, fri_id)] <= x[(d_id, sun_id)],
-                f"FriImpliesSun_{d_id}_{iso_year}_{iso_week}",
-            )
-
-    # --------------------------------------------------------
-    # 8) MAX 2 WEEKDAY NIGHTS (MON–THU) PER WEEK
-    # --------------------------------------------------------
-    for (iso_year, iso_week), night_ids in weekday_nights_per_week.items():
-        if not night_ids:
-            continue
-        for d_id in doctor_ids:
-            model += (
-                pulp.lpSum(x[(d_id, sid)] for sid in night_ids)
-                <= 2,
-                f"Max2WeeknightNights_{d_id}_{iso_year}_{iso_week}",
-            )
-
-    # --------------------------------------------------------
-    # 9) MAX 3 CONSECUTIVE NIGHTS
-    # --------------------------------------------------------
-    dates_sorted = sorted(night_shift_by_date.keys())
-
-    for i in range(len(dates_sorted) - 3):
-        d0 = dates_sorted[i]
-        d1 = dates_sorted[i + 1]
-        d2 = dates_sorted[i + 2]
-        d3 = dates_sorted[i + 3]
-
-        if (d1 - d0).days == 1 and (d2 - d1).days == 1 and (d3 - d2).days == 1:
-            s0 = night_shift_by_date[d0]
-            s1 = night_shift_by_date[d1]
-            s2 = night_shift_by_date[d2]
-            s3 = night_shift_by_date[d3]
-
-            for d_id in doctor_ids:
+    # ---------------------------------------------------
+    # 5. WEEKLY LIMIT: MAX 2 WEEKNIGHT NIGHT SHIFTS
+    # ---------------------------------------------------
+    for d in doctors:
+        for week in range(1, 6):  # week 1–5
+            week_nights = [
+                s for s in night_shifts
+                if is_weeknight(s) and s.start.isocalendar().week == week
+            ]
+            if week_nights:
                 model += (
-                    x[(d_id, s0)]
-                    + x[(d_id, s1)]
-                    + x[(d_id, s2)]
-                    + x[(d_id, s3)]
-                    <= 3,
-                    f"Max3ConsecNights_{d_id}_{d0}",
+                    pulp.lpSum(X[(d.id, s.id)] for s in week_nights) <= 2,
+                    f"max_weeknight_{d.id}_week{week}",
                 )
 
-    # --------------------------------------------------------
-    # OBJECTIVE: FAIRNESS IN TOTAL SHIFTS + NIGHT SHIFTS
-    # --------------------------------------------------------
-    # Total shifts (existing)
-    max_shifts_var = pulp.LpVariable("max_shifts_per_doctor", lowBound=0)
-    min_shifts_var = pulp.LpVariable("min_shifts_per_doctor", lowBound=0)
+    # ---------------------------------------------------
+    # 6. FRI–SAT–SUN NIGHT BLOCK RULE
+    # ---------------------------------------------------
+    friday_nights = [s for s in night_shifts if s.start.weekday() == 4]
+    saturday_nights = [s for s in night_shifts if s.start.weekday() == 5]
+    sunday_nights = [s for s in night_shifts if s.start.weekday() == 6]
 
     for d in doctors:
-        model += total_shifts_expr[d.id] <= max_shifts_var
-        model += total_shifts_expr[d.id] >= min_shifts_var
-
-    spread_total = max_shifts_var - min_shifts_var
-
-    # Night shift fairness
-    night_shifts_expr = {}
-    if night_shift_ids:
-        max_nights_var = pulp.LpVariable("max_nights_per_doctor", lowBound=0)
-        min_nights_var = pulp.LpVariable("min_nights_per_doctor", lowBound=0)
-
-        for d in doctors:
-            night_count = pulp.lpSum(
-                x[(d.id, sid)] for sid in night_shift_ids
-            )
-            night_shifts_expr[d.id] = night_count
-            model += night_count <= max_nights_var
-            model += night_count >= min_nights_var
-
-        spread_nights = max_nights_var - min_nights_var
-    else:
-        # No night shifts in this schedule
-        spread_nights = 0
-
-    # Combined objective:
-    #   weight_total * spread_total  +  weight_nights * spread_nights
-    # Tune weights if needed
-    weight_total = 1.0
-    weight_nights = 1.0
-
-    model += weight_total * spread_total + weight_nights * spread_nights
-
-    # --------------------------------------------------------
-    # SOLVE
-    # --------------------------------------------------------
-    solver = pulp.PULP_CBC_CMD(msg=False)
-    status = model.solve(solver)
-
-    if pulp.LpStatus[status] not in ("Optimal", "Feasible"):
-        # No feasible solution under current constraints
-        return None
-
-    # --------------------------------------------------------
-    # BUILD RESULT
-    # --------------------------------------------------------
-    assignments: list[Assignment] = []
-
-    for d_id in doctor_ids:
-        for s in shifts:
-            val = pulp.value(x[(d_id, s.id)])
-            if val is not None and val > 0.5:
-                assignments.append(
-                    Assignment(
-                        doctor_id=d_id,
-                        shift_id=s.id,
-                        shift_start=s.start,
-                        shift_end=s.end,
+        for f in friday_nights:
+            for s in saturday_nights:
+                if s.start.date() == f.start.date() + timedelta(days=1):
+                    model += (
+                        X[(d.id, f.id)] <= X[(d.id, s.id)],
+                        f"fri_sat_block_{d.id}_{f.id}",
                     )
-                )
+            for su in sunday_nights:
+                if su.start.date() == f.start.date() + timedelta(days=2):
+                    model += (
+                        X[(d.id, f.id)] <= X[(d.id, su.id)],
+                        f"fri_sun_block_{d.id}_{f.id}",
+                    )
+
+    # ---------------------------------------------------
+    # SOFT CONSTRAINTS (OBJECTIVE)
+    # ---------------------------------------------------
+    night_penalties = []
+    fairness_penalties = []
+    overload_penalties = []
+
+    for d in doctors:
+        num_nights = pulp.lpSum(
+            X[(d.id, s.id)] for s in shifts if is_night_shift(s)
+        )
+
+        # Prefer 2–4 nights, allow 5 but penalize above
+        night_penalties.append(0.5 * pulp.lpSum((num_nights - 3) ** 2))
+
+        # Total shifts fairness
+        total_shifts = pulp.lpSum(X[(d.id, s.id)] for s in shifts)
+        fairness_penalties.append(0.2 * (total_shifts - (len(shifts) / len(doctors))) ** 2)
+
+        # Prevent night overload
+        overload_penalties.append(1.5 * pulp.lpSum(pulp.max_(0, num_nights - 5)))
+
+    model += (
+        pulp.lpSum(night_penalties)
+        + pulp.lpSum(fairness_penalties)
+        + pulp.lpSum(overload_penalties)
+    )
+
+    # ---------------------------------------------------
+    # SOLVE
+    # ---------------------------------------------------
+    result = model.solve(pulp.PULP_CBC_CMD(msg=False))
+
+    if result != pulp.LpStatusOptimal:
+        raise ValueError("❌ No feasible solution found")
+
+    # ---------------------------------------------------
+    # BUILD RESULT
+    # ---------------------------------------------------
+    assignments = []
+    for d in doctors:
+        for s in shifts:
+            if pulp.value(X[(d.id, s.id)]) == 1:
+                assignments.append(Assignment(doctor_id=d.id, shift_id=s.id))
 
     return AssignmentResult(assignments=assignments)
+
 
 
