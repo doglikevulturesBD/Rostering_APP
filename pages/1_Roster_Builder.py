@@ -90,7 +90,9 @@ st.header("3️⃣ Optimise Roster")
 if st.button("🤖 Run Optimiser", type="primary"):
     try:
         with st.spinner("Solving roster (PuLP)..."):
-            result = build_and_solve_roster(doctors, shifts)
+
+            # 🔥 FIXED ARGUMENT ORDER
+            result = build_and_solve_roster(shifts, doctors)
 
         if result is None or len(result.assignments) == 0:
             st.error("❌ No feasible solution found by the optimiser.")
@@ -100,7 +102,7 @@ if st.button("🤖 Run Optimiser", type="primary"):
             # Save to session
             st.session_state["assignment_result"] = result
 
-            # Persist to DB (optional but recommended)
+            # Persist to DB
             try:
                 save_assignments(result.assignments)
             except Exception as e:
@@ -124,32 +126,27 @@ else:
     if not assignments:
         st.warning("Optimiser returned an empty assignment list.")
     else:
-        # ---- Roster table
         st.subheader("📋 Final Roster")
 
+        # Build dataframe from assignment pairs (doctor_id, shift_id)
         df_assign = pd.DataFrame(
             [
                 {
                     "doctor_id": a.doctor_id,
                     "shift_id": a.shift_id,
-                    "shift_date": a.shift_start.date()
-                    if hasattr(a.shift_start, "date")
-                    else str(a.shift_start),
-                    "start_time": a.shift_start.time()
-                    if hasattr(a.shift_start, "time")
-                    else "",
-                    "end_time": a.shift_end.time()
-                    if hasattr(a.shift_end, "time")
-                    else "",
                 }
                 for a in assignments
             ]
         )
 
-        st.dataframe(df_assign, use_container_width=True)
+        # Merge with shift details
+        df_shifts = pd.DataFrame([s.to_dict() for s in shifts])
+        df_merged = df_assign.merge(df_shifts, left_on="shift_id", right_on="id", how="left")
+
+        st.dataframe(df_merged, use_container_width=True)
 
         # Download CSV
-        csv_bytes = df_assign.to_csv(index=False).encode("utf-8")
+        csv_bytes = df_merged.to_csv(index=False).encode("utf-8")
         st.download_button(
             "📥 Download Roster CSV",
             data=csv_bytes,
@@ -166,5 +163,6 @@ else:
             st.dataframe(df_work, use_container_width=True)
         except Exception as e:
             st.warning(f"Could not compute workload summary: {e}")
+
 
 
