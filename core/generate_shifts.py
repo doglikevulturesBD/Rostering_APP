@@ -1,91 +1,226 @@
 # core/generate_shifts.py
 
-from datetime import datetime, timedelta, date
-import csv
+from datetime import datetime, date, time, timedelta
+from typing import List, Dict
 
 from core.database import save_generated_shifts
 
-# -------------------------------------------
-# SHIFT TEMPLATES (updated)
-# -------------------------------------------
 
-WEEKDAY_TEMPLATE = [
-    ("07:00", "18:00", 1, 2),
-    ("08:30", "18:00", 1, 2),
-    ("09:00", "20:00", 1, 1),
-    ("11:00", "22:00", 1, 2),
-    ("14:00", "01:00", 2, 3),  # reduced from 3–4
-    ("22:00", "09:00", 2, 2),  # reduced from 3
-]
-
-WEEKEND_TEMPLATE = [
-    ("07:00", "19:00", 2, 2),
-    ("09:00", "21:00", 1, 1),
-    ("11:00", "23:00", 1, 1),
-    ("13:00", "01:00", 2, 2),
-    ("21:00", "09:00", 2, 2),  # reduced from 3
-]
+def _make_datetime(d: date, h: int, m: int = 0) -> datetime:
+    return datetime(d.year, d.month, d.day, h, m)
 
 
-def _build_shift(start_str, end_str, min_docs, max_docs, day: date):
-    start_dt = datetime.combine(day, datetime.strptime(start_str, "%H:%M").time())
-    end_dt_raw = datetime.combine(day, datetime.strptime(end_str, "%H:%M").time())
+def _add_shift_row(
+    rows: List[Dict],
+    d: date,
+    start_h: int,
+    start_m: int,
+    end_h: int,
+    end_m: int,
+    min_docs: int,
+    max_docs: int,
+    is_weekend: bool,
+):
+    """Helper to append a single shift row with proper duration + ISO strings."""
+    start_dt = _make_datetime(d, start_h, start_m)
+    end_dt = _make_datetime(d, end_h, end_m)
 
-    # Handle overnight (cross midnight)
-    if end_dt_raw <= start_dt:
-        end_dt = end_dt_raw + timedelta(days=1)
-    else:
-        end_dt = end_dt_raw
+    # Handle overnight shifts (end next day)
+    if end_dt <= start_dt:
+        end_dt = end_dt + timedelta(days=1)
 
     duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
 
-    return {
-        "date": day.isoformat(),
-        "start_time": start_dt.isoformat(),
-        "end_time": end_dt.isoformat(),
-        "duration_hours": duration_hours,
-        "min_doctors": min_docs,
-        "max_doctors": max_docs,
-        "is_weekend": 1 if day.weekday() >= 5 else 0,
-    }
+    rows.append(
+        {
+            "date": d.isoformat(),
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "duration_hours": duration_hours,
+            "min_doctors": min_docs,
+            "max_doctors": max_docs,
+            "is_weekend": 1 if is_weekend else 0,
+        }
+    )
 
 
-def generate_shifts_for_month(year: int, month: int, csv_output_path: str):
-    """Generate all shifts for a month, save to DB and CSV."""
+def generate_shifts_for_month(year: int, month: int) -> None:
+    """
+    Generate all shifts for a given month and save them to the DB.
+
+    Uses the following templates:
+
+    WEEKDAYS (Mon–Fri)
+    - 07:00–18:00  -> min=2, max=2
+    - 09:00–20:00  -> min=1, max=1
+    - 11:00–22:00  -> min=0, max=1  (preferred 1, but can be 0)
+    - 14:00–01:00  -> min=3, max=4  (preferred 4, but must have 3)
+    - 22:00–09:00  -> min=3, max=3
+
+    WEEKENDS (Sat–Sun)
+    - 07:00–19:00  -> min=2, max=2
+    - 09:00–21:00  -> min=1, max=1
+    - 11:00–23:00  -> min=1, max=1
+    - 13:00–01:00  -> min=2, max=2
+    - 21:00–09:00  -> min=3, max=3
+    """
+    rows: List[Dict] = []
+
+    # Determine first and last day of the month
+    first_day = date(year, month, 1)
     if month == 12:
         next_month = date(year + 1, 1, 1)
     else:
         next_month = date(year, month + 1, 1)
 
-    num_days = (next_month - date(year, month, 1)).days
+    d = first_day
+    while d < next_month:
+        weekday_index = d.weekday()  # 0=Mon, ..., 5=Sat, 6=Sun
+        is_weekend = weekday_index >= 5  # Sat/Sun
 
-    shift_rows = []
+        if not is_weekend:
+            # -----------------------------
+            # WEEKDAY SHIFTS (Mon–Fri)
+            # -----------------------------
 
-    for day_num in range(1, num_days + 1):
-        d = date(year, month, day_num)
-        template = WEEKEND_TEMPLATE if d.weekday() >= 5 else WEEKDAY_TEMPLATE
+            # 07:00–18:00 (must have 2)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=7,
+                start_m=0,
+                end_h=18,
+                end_m=0,
+                min_docs=2,
+                max_docs=2,
+                is_weekend=False,
+            )
 
-        for (start, end, min_docs, max_docs) in template:
-            shift = _build_shift(start, end, min_docs, max_docs, d)
-            shift_rows.append(shift)
+            # 09:00–20:00 (must have 1)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=9,
+                start_m=0,
+                end_h=20,
+                end_m=0,
+                min_docs=1,
+                max_docs=1,
+                is_weekend=False,
+            )
 
-    save_generated_shifts(shift_rows)
+            # 11:00–22:00 (preferred 1, can be 0)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=11,
+                start_m=0,
+                end_h=22,
+                end_m=0,
+                min_docs=0,
+                max_docs=1,
+                is_weekend=False,
+            )
 
-    fieldnames = [
-        "date",
-        "start_time",
-        "end_time",
-        "duration_hours",
-        "min_doctors",
-        "max_doctors",
-        "is_weekend",
-    ]
+            # 14:00–01:00 (min 3, max 4)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=14,
+                start_m=0,
+                end_h=1,
+                end_m=0,
+                min_docs=3,
+                max_docs=4,
+                is_weekend=False,
+            )
 
-    with open(csv_output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(shift_rows)
+            # 22:00–09:00 (must have 3)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=22,
+                start_m=0,
+                end_h=9,
+                end_m=0,
+                min_docs=3,
+                max_docs=3,
+                is_weekend=False,
+            )
 
-    return shift_rows
+        else:
+            # -----------------------------
+            # WEEKEND SHIFTS (Sat–Sun)
+            # -----------------------------
+
+            # 07:00–19:00 (must have 2)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=7,
+                start_m=0,
+                end_h=19,
+                end_m=0,
+                min_docs=2,
+                max_docs=2,
+                is_weekend=True,
+            )
+
+            # 09:00–21:00 (must have 1)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=9,
+                start_m=0,
+                end_h=21,
+                end_m=0,
+                min_docs=1,
+                max_docs=1,
+                is_weekend=True,
+            )
+
+            # 11:00–23:00 (must have 1)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=11,
+                start_m=0,
+                end_h=23,
+                end_m=0,
+                min_docs=1,
+                max_docs=1,
+                is_weekend=True,
+            )
+
+            # 13:00–01:00 (must have 2)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=13,
+                start_m=0,
+                end_h=1,
+                end_m=0,
+                min_docs=2,
+                max_docs=2,
+                is_weekend=True,
+            )
+
+            # 21:00–09:00 (must have 3)
+            _add_shift_row(
+                rows,
+                d,
+                start_h=21,
+                start_m=0,
+                end_h=9,
+                end_m=0,
+                min_docs=3,
+                max_docs=3,
+                is_weekend=True,
+            )
+
+        d = d + timedelta(days=1)
+
+    # Save everything into the DB
+    save_generated_shifts(rows)
 
 
