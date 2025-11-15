@@ -10,8 +10,12 @@ from core.database import (
     get_all_doctors,
     load_shifts,
     get_all_leave,
-    get_all_preferences,
 )
+
+# Temporary fallback until preferences exist
+def get_all_preferences():
+    return []
+
 
 st.set_page_config(page_title="Database Tools", layout="wide")
 st.title("🛠️ Database Tools & Utilities")
@@ -22,24 +26,25 @@ st.title("🛠️ Database Tools & Utilities")
 
 st.subheader("📁 Database Path Information")
 
-db_folder_exists = os.path.exists(DB_PATH.parent)
-db_exists = os.path.exists(DB_PATH)
-abs_path = DB_PATH.resolve()
+DB_PATH = Path(DB_PATH)   # Convert to Path object
+db_exists = DB_PATH.exists()
+folder_exists = DB_PATH.parent.exists()
 
 st.write("**Expected DB Location:**")
 st.code(str(DB_PATH))
 
 st.write("**Absolute Location:**")
-st.code(str(abs_path))
+st.code(str(DB_PATH.resolve()))
 
 col1, col2 = st.columns(2)
-col1.metric("Folder exists?", "Yes" if db_folder_exists else "No")
-col2.metric("Database exists?", "Yes" if db_exists else "No")
+col1.metric("Folder exists?", "Yes" if folder_exists else "No")
+col2.metric("DB exists?", "Yes" if db_exists else "No")
 
-if not db_folder_exists:
-    st.error("The folder 'data/' does not exist. Create it in your repo with a .gitkeep file.")
+if not folder_exists:
+    st.error("The folder 'data/' does not exist. Please create it in your repo.")
+
 if not db_exists:
-    st.warning("Database not found. It will be created on next app reload.")
+    st.warning("Database not found. It will be created when shifts or doctors are added.")
 
 
 # ----------------------------------------------------------
@@ -48,25 +53,21 @@ if not db_exists:
 
 st.subheader("🔍 Scan for Other Database Files")
 
-db_files = []
-for root, dirs, files in os.walk(".", topdown=True):
-    for f in files:
-        if f.endswith(".db"):
-            db_files.append(os.path.join(root, f))
+db_files = list(Path(".").rglob("*.db"))
 
 if db_files:
-    st.success("Found the following .db files:")
+    st.success("Found database files:")
     for f in db_files:
-        st.code(f)
+        st.code(str(f))
 else:
-    st.info("No .db files found in the working directory.")
+    st.info("No *.db files detected.")
 
 
 # ----------------------------------------------------------
 # SECTION: DB INSPECTOR
 # ----------------------------------------------------------
 
-st.subheader("📊 Database Inspector (Table Summaries)")
+st.subheader("📊 Database Inspector")
 
 try:
     doctors = get_all_doctors(active_only=False)
@@ -77,95 +78,84 @@ try:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Doctors", len(doctors))
     col2.metric("Shifts", len(shifts))
-    col3.metric("Leave Entries", len(leave))
+    col3.metric("Leave entries", len(leave))
     col4.metric("Preferences", len(prefs))
 
-    st.write("### Preview Doctors")
-    if doctors:
-        st.dataframe(
-            pd.DataFrame([d.__dict__ for d in doctors]),
-            use_container_width=True,
-        )
-    else:
-        st.info("No doctor data available.")
+    st.write("### Doctors")
+    st.dataframe(
+        pd.DataFrame([d.__dict__ for d in doctors]),
+        use_container_width=True
+    )
 
-    st.write("### Preview Shifts")
-    if shifts:
-        st.dataframe(
-            pd.DataFrame([s.to_dict() for s in shifts]),
-            use_container_width=True,
-        )
-    else:
-        st.info("No shift data.")
+    st.write("### Shifts")
+    st.dataframe(
+        pd.DataFrame([s.to_dict() for s in shifts]),
+        use_container_width=True
+    )
 
-    st.write("### Preview Leave Requests")
-    if leave:
-        df_leave = pd.DataFrame([dict(row) for row in leave])
-        st.dataframe(df_leave, use_container_width=True)
-    else:
-        st.info("No leave requests.")
+    st.write("### Leave")
+    st.dataframe(
+        pd.DataFrame([dict(row) for row in leave]),
+        use_container_width=True
+    )
 
-    st.write("### Preview Preferences")
-    if prefs:
-        df_pref = pd.DataFrame([dict(row) for row in prefs])
-        st.dataframe(df_pref, use_container_width=True)
-    else:
-        st.info("No preference entries.")
+    st.write("### Preferences")
+    st.dataframe(
+        pd.DataFrame([dict(row) for row in prefs]),
+        use_container_width=True
+    )
 
 except Exception as e:
-    st.error(f"Error reading database: {e}")
+    st.error(f"Error loading data: {e}")
 
 
 # ----------------------------------------------------------
-# SECTION: DB BACKUP / EXPORT
+# SECTION: BACKUP / EXPORT
 # ----------------------------------------------------------
 
-st.subheader("💾 Backup / Export Database")
+st.subheader("💾 Backup / Export")
 
 if db_exists:
-    if st.button("Download Full Backup (JSON)", type="primary"):
+    if st.button("Download JSON Backup"):
         backup = {
             "doctors": [d.__dict__ for d in doctors],
             "shifts": [s.to_dict() for s in shifts],
             "leave": [dict(r) for r in leave],
             "preferences": [dict(r) for r in prefs],
         }
-        backup_bytes = json.dumps(backup, indent=2).encode("utf-8")
         st.download_button(
-            "Download Backup File",
-            backup_bytes,
+            "Download File",
+            json.dumps(backup, indent=2).encode(),
             file_name="roster_backup.json",
-            mime="application/json",
+            mime="application/json"
         )
-else:
-    st.info("Database does not exist. Create shifts/doctors to generate it.")
 
 
 # ----------------------------------------------------------
-# SECTION: DB RESET / DELETE
+# SECTION: RESET / DELETE
 # ----------------------------------------------------------
 
 st.subheader("🧨 Reset / Delete Database")
 
 colA, colB = st.columns(2)
 
-if colA.button("❌ Delete Database File"):
+if colA.button("❌ Delete database file"):
     if db_exists:
         os.remove(DB_PATH)
-        st.success("Database deleted successfully. Reload the app to recreate it.")
+        st.success("Database deleted. Reload the app.")
     else:
-        st.warning("Database file not found.")
+        st.warning("No DB file found.")
 
-if colB.button("🧹 Clear All Data (but keep DB structure)"):
+if colB.button("🧹 Clear all table data"):
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("DELETE FROM doctors")
         cur.execute("DELETE FROM shifts")
         cur.execute("DELETE FROM leave_requests")
-        cur.execute("DELETE FROM doctor_preferences")
         conn.commit()
         conn.close()
-        st.success("All table data cleared. Structure preserved.")
+        st.success("All data cleared.")
     except Exception as e:
         st.error(f"Error clearing data: {e}")
+
