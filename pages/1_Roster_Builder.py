@@ -5,107 +5,166 @@ from datetime import datetime
 from core.generate_shifts import generate_shifts_for_month
 from core.database import (
     load_shifts,
+    get_all_doctors,
     save_assignments,
 )
 from core.optimizer import build_and_solve_roster
 from core.workload_analyzer import compute_workload
 
 st.set_page_config(page_title="Roster Builder", layout="wide")
-st.title("🗓️ Roster Builder")
+st.title("📅 Roster Builder")
 
 # ---------------------------------------------------------
-# SECTION: SHIFT GENERATION
+# 1) Generate monthly shifts
 # ---------------------------------------------------------
 
 st.header("1️⃣ Generate Monthly Shifts")
 
 col1, col2 = st.columns(2)
-year = col1.number_input("Year", min_value=2024, max_value=2050, value=datetime.now().year)
-month = col2.number_input("Month", min_value=1, max_value=12, value=datetime.now().month)
+year = col1.number_input(
+    "Year", min_value=2024, max_value=2100, value=datetime.now().year
+)
+month = col2.number_input(
+    "Month (1–12)", min_value=1, max_value=12, value=datetime.now().month
+)
 
-if st.button("📅 Generate Shifts for Month"):
+if st.button("🛠 Generate Shifts for This Month", type="primary"):
     try:
         generate_shifts_for_month(int(year), int(month))
-        st.success("Shifts generated and saved to database.")
+        st.success("Shifts successfully generated and saved to the database.")
+        st.experimental_rerun()
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error generating shifts: {e}")
+
+# ---------------------------------------------------------
+# 2) Show shifts & doctors
+# ---------------------------------------------------------
+
+st.header("2️⃣ Current Shifts & Doctors")
 
 shifts = load_shifts()
+doctors = get_all_doctors(active_only=True)
 
-if shifts:
-    st.write("### Generated Shifts Preview")
-    df_shifts = pd.DataFrame([s.to_dict() for s in shifts])
-    st.dataframe(df_shifts, use_container_width=True)
-else:
-    st.info("No shifts available. Generate above.")
+col_shifts, col_docs = st.columns(2)
 
-# ---------------------------------------------------------
-# SECTION: OPTIMIZER
-# ---------------------------------------------------------
-
-st.header("2️⃣ Build & Solve Monthly Roster")
-
-if st.button("⚙️ Run Optimizer"):
+with col_shifts:
+    st.subheader("Shifts")
     if not shifts:
-        st.error("No shifts found. Please generate shifts first.")
+        st.info("No shifts found. Generate for a month above.")
     else:
-        with st.spinner("Optimizing roster... this may take 10–20 seconds..."):
-            result = build_and_solve_roster(shifts)
+        df_shifts = pd.DataFrame([s.to_dict() for s in shifts])
+        st.dataframe(df_shifts, use_container_width=True)
 
-        if result is None:
-            st.error("❌ No feasible solution found.")
+with col_docs:
+    st.subheader("Doctors")
+    if not doctors:
+        st.warning("No active doctors found. Add doctors in the Doctor Manager page.")
+    else:
+        df_docs = pd.DataFrame(
+            [
+                {
+                    "id": d.id,
+                    "name": d.name,
+                    "level": d.level,
+                    "firm": d.firm,
+                    "contract_hours": d.contract_hours_per_month,
+                    "min_shifts": d.min_shifts_per_month,
+                    "max_shifts": d.max_shifts_per_month,
+                    "active": d.active,
+                }
+                for d in doctors
+            ]
+        )
+        st.dataframe(df_docs, use_container_width=True)
+
+# If we don't have both, stop here
+if not shifts or not doctors:
+    st.stop()
+
+# ---------------------------------------------------------
+# 3) Run optimiser
+# ---------------------------------------------------------
+
+st.header("3️⃣ Optimise Roster")
+
+if st.button("🤖 Run Optimiser", type="primary"):
+    try:
+        with st.spinner("Solving roster (PuLP)..."):
+            result = build_and_solve_roster(doctors, shifts)
+
+        if result is None or len(result.assignments) == 0:
+            st.error("❌ No feasible solution found by the optimiser.")
         else:
-            st.success("Roster successfully optimized!")
+            st.success("✅ Optimised roster generated!")
 
-            # Store into session
-            st.session_state["assignments"] = result
+            # Save to session
+            st.session_state["assignment_result"] = result
 
-            # Also save to DB (optional)
+            # Persist to DB (optional but recommended)
             try:
                 save_assignments(result.assignments)
             except Exception as e:
-                st.warning(f"Assignments saved to session only (DB save failed): {e}")
+                st.warning(f"Assignments not saved to DB (session-only): {e}")
+
+    except Exception as e:
+        st.error(f"Error running optimiser: {e}")
 
 # ---------------------------------------------------------
-# SECTION: DISPLAY RESULTS
+# 4) Display roster & workload
 # ---------------------------------------------------------
 
-st.header("3️⃣ Roster Results")
+st.header("4️⃣ Roster & Workload Summary")
 
-if "assignments" not in st.session_state:
-    st.info("Run the optimizer to view the roster.")
+if "assignment_result" not in st.session_state:
+    st.info("Run the optimiser to generate a roster.")
 else:
-    result = st.session_state["assignments"]
-
-    # Safely extract the assignments list
+    result = st.session_state["assignment_result"]
     assignments = result.assignments
 
-    # If empty (rare), inform user
-    if len(assignments) == 0:
-        st.warning("Optimizer returned 0 assignments.")
+    if not assignments:
+        st.warning("Optimiser returned an empty assignment list.")
     else:
-        st.write("### Final Roster")
+        # ---- Roster table
+        st.subheader("📋 Final Roster")
 
-        df = pd.DataFrame([
-            {
-                "doctor": a.doctor_id,
-                "shift_id": a.shift_id,
-                "date": a.shift_start.date(),
-                "start": a.shift_start.time(),
-                "end": a.shift_end.time(),
-            }
-            for a in assignments
-        ])
+        df_assign = pd.DataFrame(
+            [
+                {
+                    "doctor_id": a.doctor_id,
+                    "shift_id": a.shift_id,
+                    "shift_date": a.shift_start.date()
+                    if hasattr(a.shift_start, "date")
+                    else str(a.shift_start),
+                    "start_time": a.shift_start.time()
+                    if hasattr(a.shift_start, "time")
+                    else "",
+                    "end_time": a.shift_end.time()
+                    if hasattr(a.shift_end, "time")
+                    else "",
+                }
+                for a in assignments
+            ]
+        )
 
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df_assign, use_container_width=True)
 
-        # ---------------------------------------------------------
-        # SECTION: WORKLOAD ANALYSIS
-        # ---------------------------------------------------------
-        st.write("### Doctor Workload Summary")
+        # Download CSV
+        csv_bytes = df_assign.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "📥 Download Roster CSV",
+            data=csv_bytes,
+            file_name="roster_output.csv",
+            mime="text/csv",
+        )
 
-        wl = compute_workload(assignments)
+        # ---- Workload summary
+        st.subheader("🔥 Workload & Burnout Preview")
 
-        df_work = pd.DataFrame(wl)
-        st.dataframe(df_work, use_container_width=True)
+        try:
+            workload = compute_workload(doctors, shifts, assignments)
+            df_work = pd.DataFrame([w.to_dict() for w in workload])
+            st.dataframe(df_work, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not compute workload summary: {e}")
+
 
