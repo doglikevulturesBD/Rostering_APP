@@ -1,22 +1,25 @@
-# core/models.py
-
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List
 
 
+# --------------------------------------------------------
+# DOCTOR OBJECT
+# --------------------------------------------------------
 @dataclass
 class Doctor:
     id: str
     name: str
     level: str
-    firm: Optional[int]
+    firm: int | None
     contract_hours_per_month: int
     min_shifts_per_month: int
     max_shifts_per_month: int
     active: bool = True
 
 
+# --------------------------------------------------------
+# SHIFT OBJECT
+# --------------------------------------------------------
 @dataclass
 class Shift:
     id: int
@@ -27,28 +30,33 @@ class Shift:
     max_doctors: int
     is_weekend: bool
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "duration_hours": self.duration_hours,
+            "min_doctors": self.min_doctors,
+            "max_doctors": self.max_doctors,
+            "is_weekend": self.is_weekend,
+        }
 
+
+# --------------------------------------------------------
+# ASSIGNMENT OBJECT (single allocation)
+# --------------------------------------------------------
 @dataclass
 class Assignment:
     doctor_id: str
     shift_id: int
+    shift_start: str
+    shift_end: str
 
 
+# --------------------------------------------------------
+# RESULT OBJECT (collection)
+# --------------------------------------------------------
 @dataclass
-class Roster:
-    doctors: List[Doctor]
-    shifts: List[Shift]
-    assignments: List[Assignment]
+class AssignmentResult:
+    assignments: list[Assignment]
 
-
-@dataclass
-class DoctorWorkload:
-    doctor_id: str
-    total_shifts: int = 0
-    total_hours: float = 0.0
-    night_shifts: int = 0
-    weekend_shifts: int = 0
-    consecutive_days: int = 0
-    consecutive_nights: int = 0
-    rest_violations: int = 0
-    burnout_score: float = 0.0
